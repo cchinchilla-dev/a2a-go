@@ -32,11 +32,13 @@ import (
 	"github.com/google/uuid"
 )
 
+// JSONRPCTransportConfig holds the configuration for the JSON-RPC transport.
 type JSONRPCTransportConfig struct {
 	URL    string
 	Client *http.Client
 }
 
+// NewJSONRPCTransportFactory creates a new [TransportFactory] for the JSON-RPC protocol binding.
 func NewJSONRPCTransportFactory(cfg JSONRPCTransportConfig) a2aclient.TransportFactory {
 	return a2aclient.TransportFactoryFn(func(ctx context.Context, card *a2a.AgentCard, iface *a2a.AgentInterface) (a2aclient.Transport, error) {
 		if cfg.URL == "" {
@@ -46,6 +48,7 @@ func NewJSONRPCTransportFactory(cfg JSONRPCTransportConfig) a2aclient.TransportF
 	})
 }
 
+// NewJSONRPCTransport creates a new Transport for the JSON-RPC protocol binding.
 func NewJSONRPCTransport(cfg JSONRPCTransportConfig) a2aclient.Transport {
 	t := &jsonrpcTransport{
 		url:        cfg.URL,
@@ -366,8 +369,8 @@ func (t *jsonrpcTransport) DeleteTaskPushConfig(ctx context.Context, params a2ac
 }
 
 // GetExtendedAgentCard retrieves the agent's card.
-func (t *jsonrpcTransport) GetExtendedAgentCard(ctx context.Context, params a2aclient.ServiceParams) (*a2a.AgentCard, error) {
-	result, err := t.sendRequest(ctx, methodGetExtendedAgentCard, params, nil)
+func (t *jsonrpcTransport) GetExtendedAgentCard(ctx context.Context, params a2aclient.ServiceParams, req *a2a.GetExtendedAgentCardRequest) (*a2a.AgentCard, error) {
+	result, err := t.sendRequest(ctx, methodGetExtendedAgentCard, params, req)
 	if err != nil {
 		return nil, err
 	}

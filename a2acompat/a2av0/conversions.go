@@ -119,11 +119,11 @@ func toCompatMessage(m *a2a.Message) *message {
 	}
 }
 
-func toCompatParts(parts a2a.ContentParts) ContentParts {
+func toCompatParts(parts a2a.ContentParts) contentParts {
 	if len(parts) == 0 {
 		return nil
 	}
-	res := make(ContentParts, len(parts))
+	res := make(contentParts, len(parts))
 	for i, p := range parts {
 		switch c := p.Content.(type) {
 		case a2a.Text:
@@ -148,7 +148,7 @@ func toCompatParts(parts a2a.ContentParts) ContentParts {
 		case a2a.Raw:
 			res[i] = filePart{
 				File: fileBytes{
-					FileMeta: FileMeta{
+					fileMeta: fileMeta{
 						MimeType: p.MediaType,
 						Name:     p.Filename,
 					},
@@ -159,7 +159,7 @@ func toCompatParts(parts a2a.ContentParts) ContentParts {
 		case a2a.URL:
 			res[i] = filePart{
 				File: fileURI{
-					FileMeta: FileMeta{
+					fileMeta: fileMeta{
 						MimeType: p.MediaType,
 						Name:     p.Filename,
 					},
@@ -462,7 +462,7 @@ func toCoreMessage(m *message) (*a2a.Message, error) {
 	}, nil
 }
 
-func toCoreParts(parts ContentParts) (a2a.ContentParts, error) {
+func toCoreParts(parts contentParts) (a2a.ContentParts, error) {
 	if len(parts) == 0 {
 		return nil, nil
 	}

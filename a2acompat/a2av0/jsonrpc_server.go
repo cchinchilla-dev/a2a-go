@@ -31,6 +31,7 @@ import (
 	"github.com/a2aproject/a2a-go/log"
 )
 
+// JSONRPCHandlerConfig holds the configuration for the JSON-RPC handler.
 type JSONRPCHandlerConfig struct {
 	PanicHandler      func(r any) error
 	KeepAliveInterval time.Duration
@@ -52,9 +53,10 @@ func NewJSONRPCHandler(handler a2asrv.RequestHandler, config JSONRPCHandlerConfi
 	return h
 }
 
+// ServeHTTP handles incoming HTTP requests.
 func (h *jsonrpcHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	ctx := req.Context()
-	ctx, _ = a2asrv.WithCallContext(ctx, a2asrv.NewServiceParams(req.Header))
+	ctx, _ = a2asrv.NewCallContext(ctx, a2asrv.NewServiceParams(req.Header))
 
 	if req.Method != "POST" {
 		h.writeJSONRPCError(ctx, rw, a2a.ErrInvalidRequest, nil)
@@ -384,7 +386,7 @@ func (h *jsonrpcHandler) onDeleteTaskPushConfig(ctx context.Context, raw json.Ra
 }
 
 func (h *jsonrpcHandler) onGetAgentCard(ctx context.Context) (*agentCard, error) {
-	card, err := h.handler.GetExtendedAgentCard(ctx)
+	card, err := h.handler.GetExtendedAgentCard(ctx, &a2a.GetExtendedAgentCardRequest{})
 	if err != nil {
 		return nil, err
 	}
