@@ -190,13 +190,8 @@ func ExampleNewArtifactEvent() {
 }
 
 func ExampleMessage_MarshalJSON() {
-	msg := &a2a.Message{
-		ID:   "msg-1",
-		Role: a2a.MessageRoleUser,
-		Parts: a2a.ContentParts{
-			a2a.TextPart{Text: "Hello"},
-		},
-	}
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "Hello"})
+	msg.ID = "msg-1"
 
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -205,7 +200,10 @@ func ExampleMessage_MarshalJSON() {
 	}
 
 	var raw map[string]any
-	_ = json.Unmarshal(data, &raw)
+	if err = json.Unmarshal(data, &raw); err != nil {
+		fmt.Println("Error unmarshaling raw:", err)
+		return
+	}
 	fmt.Println("kind:", raw["kind"])
 	fmt.Println("role:", raw["role"])
 	// Output:
@@ -227,7 +225,10 @@ func ExampleTask_MarshalJSON() {
 	}
 
 	var raw map[string]any
-	_ = json.Unmarshal(data, &raw)
+	if err = json.Unmarshal(data, &raw); err != nil {
+		fmt.Println("Error unmarshaling raw:", err)
+		return
+	}
 	fmt.Println("kind:", raw["kind"])
 	fmt.Println("id:", raw["id"])
 	// Output:
