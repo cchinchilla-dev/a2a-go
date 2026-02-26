@@ -1234,7 +1234,7 @@ func TestGrpcHandler_GetExtendedAgentCard(t *testing.T) {
 		{
 			name:         "nil producer",
 			cardProducer: nil,
-			wantErr:      codes.NotFound,
+			wantErr:      codes.FailedPrecondition,
 		},
 		{
 			name: "producer returns nil card",
