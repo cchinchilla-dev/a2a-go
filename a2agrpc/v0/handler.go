@@ -20,6 +20,7 @@ import (
 
 	"github.com/a2aproject/a2a-go/a2apb"
 	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2acompat/a2av0"
 	"github.com/a2aproject/a2a-go/v1/internal/grpcutil"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -306,7 +307,7 @@ func (h *Handler) DeleteTaskPushNotificationConfig(ctx context.Context, pbReq *a
 func withCallContext(ctx context.Context) (context.Context, *a2asrv.CallContext) {
 	var svcParams *a2asrv.ServiceParams
 	if meta, ok := metadata.FromIncomingContext(ctx); ok {
-		svcParams = a2asrv.NewServiceParams(meta)
+		svcParams = a2av0.ToServiceParams(meta)
 	}
 	return a2asrv.NewCallContext(ctx, svcParams)
 }
@@ -316,5 +317,5 @@ func toTrailer(callCtx *a2asrv.CallContext) metadata.MD {
 	if len(activated) == 0 {
 		return metadata.MD{}
 	}
-	return metadata.MD{strings.ToLower(a2asrv.ExtensionsMetaKey): activated}
+	return metadata.MD{strings.ToLower("X-" + a2a.SvcParamExtensions): activated}
 }

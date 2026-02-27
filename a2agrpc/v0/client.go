@@ -23,6 +23,7 @@ import (
 	"github.com/a2aproject/a2a-go/a2apb"
 	"github.com/a2aproject/a2a-go/v1/a2a"
 	"github.com/a2aproject/a2a-go/v1/a2aclient"
+	"github.com/a2aproject/a2a-go/v1/a2acompat/a2av0"
 	"github.com/a2aproject/a2a-go/v1/a2apb/v0/pbconv"
 	"github.com/a2aproject/a2a-go/v1/internal/grpcutil"
 	"google.golang.org/grpc"
@@ -260,7 +261,7 @@ func withGRPCMetadata(ctx context.Context, params a2aclient.ServiceParams) conte
 		return ctx
 	}
 	meta := metadata.MD{}
-	for k, vals := range params {
+	for k, vals := range a2av0.FromServiceParams(params) {
 		meta[strings.ToLower(k)] = vals
 	}
 	return metadata.NewOutgoingContext(ctx, meta)

@@ -86,7 +86,7 @@ func (t *jsonrpcTransport) newHTTPRequest(ctx context.Context, method string, pa
 
 	httpReq.Header.Set("Content-Type", jsonrpc.ContentJSON)
 
-	for k, vals := range params {
+	for k, vals := range FromServiceParams(params) {
 		for _, v := range vals {
 			httpReq.Header.Add(k, v)
 		}

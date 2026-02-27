@@ -18,11 +18,47 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"strings"
+
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2aclient"
+	"github.com/a2aproject/a2a-go/v1/a2asrv"
+	"github.com/a2aproject/a2a-go/v1/log"
 
 	a2alegacy "github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/v1/a2a"
-	"github.com/a2aproject/a2a-go/v1/log"
 )
+
+// ToServiceParams converts a map of HTTP headers to a ServiceParams object taking
+// converting legacy key names to the new ones.
+func ToServiceParams(headers map[string][]string) *a2asrv.ServiceParams {
+	modernExtensionsKey := strings.ToLower(a2a.SvcParamExtensions)
+	meta := make(map[string][]string, len(headers))
+	legacyExtensionsKey := "x-" + modernExtensionsKey
+	for k, v := range headers {
+		lk := strings.ToLower(k)
+		if lk == legacyExtensionsKey {
+			meta[modernExtensionsKey] = v
+		} else {
+			meta[lk] = v
+		}
+	}
+	return a2asrv.NewServiceParams(meta)
+}
+
+// FromServiceParams converts a ServiceParams object to a map of HTTP headers taking
+// converting new key names to the legacy ones.
+func FromServiceParams(params a2aclient.ServiceParams) map[string][]string {
+	modernExtensionsKey := strings.ToLower(a2a.SvcParamExtensions)
+	result := map[string][]string{}
+	for k, vals := range params {
+		lk := strings.ToLower(k)
+		if lk == modernExtensionsKey {
+			lk = "x-" + lk // old servers expect x- prefix
+		}
+		result[lk] = vals
+	}
+	return result
+}
 
 var v1ToLegacyTaskState = map[a2a.TaskState]a2alegacy.TaskState{
 	a2a.TaskStateAuthRequired:  a2alegacy.TaskStateAuthRequired,
