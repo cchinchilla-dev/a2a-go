@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.0.1-alpha](https://github.com/a2aproject/a2a-go/compare/v1.0.0-alpha...v1.0.1-alpha) (2026-02-27)
+## [1.0.0-alpha.2](https://github.com/a2aproject/a2a-go/compare/v1.0.0-alpha...v1.0.0-alpha.2) (2026-02-27)
 
 Versioning is introduced on the SDK level, the new version is `github.com/a2aproject/a2a-go/v1`.
 
