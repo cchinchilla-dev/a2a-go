@@ -16,6 +16,9 @@ package a2asrv
 
 import (
 	"context"
+
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2asrv/taskstore"
 )
 
 type callContextKeyType struct{}
@@ -27,23 +30,26 @@ func CallContextFrom(ctx context.Context) (*CallContext, bool) {
 	return callCtx, ok
 }
 
-// WithCallContext can be called by a transport implementation to provide request metadata to [RequestHandler]
-// or to have access to the list of activated extensions after the call ends.
+// NewCallContext can be called by a transport implementations to provide request metadata to [RequestHandler]
+// or to have access to the list of activated extensions via the returned CallContext after the call ends.
 // If context already had a [CallContext] attached, the old context will be shadowed.
-func WithCallContext(ctx context.Context, meta *RequestMeta) (context.Context, *CallContext) {
-	callCtx := &CallContext{User: unauthenticatedUser{}, requestMeta: meta}
+func NewCallContext(ctx context.Context, params *ServiceParams) (context.Context, *CallContext) {
+	callCtx := &CallContext{User: &User{Authenticated: false}, svcParams: params}
 	return context.WithValue(ctx, callContextKeyType{}, callCtx), callCtx
 }
 
 // CallContext holds information about the current server call scope.
 type CallContext struct {
 	method              string
-	requestMeta         *RequestMeta
+	svcParams           *ServiceParams
 	activatedExtensions []string
 
 	// User can be set by authentication middleware to provide information about
 	// the user who initiated the request.
-	User User
+	User *User
+
+	// tenant is an optional ID of the agent owner.
+	tenant string
 }
 
 // Method returns the name of the RequestHandler method which is being executed.
@@ -51,9 +57,14 @@ func (cc *CallContext) Method() string {
 	return cc.method
 }
 
-// RequestMeta returns metadata of the request which created the call context.
-func (cc *CallContext) RequestMeta() *RequestMeta {
-	return cc.requestMeta
+// ServiceParams returns metadata of the request which created the call context.
+func (cc *CallContext) ServiceParams() *ServiceParams {
+	return cc.svcParams
+}
+
+// Tenant returns the tenant ID of the current call context.
+func (cc *CallContext) Tenant() string {
+	return cc.tenant
 }
 
 // Extensions returns a struct which provides an API for working with extensions in the current call context.
@@ -81,28 +92,43 @@ type Response struct {
 //   - After will be executed in the reverse order sequentially.
 type CallInterceptor interface {
 	// Before allows to observe, modify or reject a Request.
-	// A new context.Context can be returned to pass information to one of the extension points.
-	Before(ctx context.Context, callCtx *CallContext, req *Request) (context.Context, error)
+	// A new context.Context can be returned to pass information down the call stack.
+	// If either the result (2nd return value) or the error (3rd return value) is non nil,
+	// the actual handler will not be called and the value will be returned to the client.
+	Before(ctx context.Context, callCtx *CallContext, req *Request) (context.Context, any, error)
 
 	// After allows to observe, modify or reject a Response.
+	// Context passed to this method will be the same as returned from [CallInterceptor.Before].
 	After(ctx context.Context, callCtx *CallContext, resp *Response) error
 }
 
-// WithCallInterceptor adds a CallInterceptor which will be applied to all requests and responses.
-func WithCallInterceptor(interceptor CallInterceptor) RequestHandlerOption {
-	return func(ih *InterceptedHandler, h *defaultRequestHandler) {
-		ih.Interceptors = append(ih.Interceptors, interceptor)
+// NewTaskStoreAuthenticator returns a taskstore.Authenticator which uses the CallContext to get the user name.
+func NewTaskStoreAuthenticator() taskstore.Authenticator {
+	return func(ctx context.Context) (string, error) {
+		if callCtx, ok := CallContextFrom(ctx); ok {
+			return callCtx.User.Name, nil
+		}
+		return "", a2a.ErrUnauthenticated
 	}
 }
 
-// PassthroughInterceptor can be used by [CallInterceptor] implementers who don't need all methods.
+// WithCallInterceptors adds a [CallInterceptor] which will be applied to all requests and responses.
+func WithCallInterceptors(interceptors ...CallInterceptor) RequestHandlerOption {
+	return func(ih *InterceptedHandler, h *defaultRequestHandler) {
+		ih.Interceptors = append(ih.Interceptors, interceptors...)
+	}
+}
+
+// PassthroughCallInterceptor can be used by [CallInterceptor] implementers who don't need all methods.
 // The struct can be embedded for providing a no-op implementation.
 type PassthroughCallInterceptor struct{}
 
-func (PassthroughCallInterceptor) Before(ctx context.Context, callCtx *CallContext, req *Request) (context.Context, error) {
-	return ctx, nil
+// Before implements [CallInterceptor.Before].
+func (PassthroughCallInterceptor) Before(ctx context.Context, callCtx *CallContext, req *Request) (context.Context, any, error) {
+	return ctx, nil, nil
 }
 
+// After implements [CallInterceptor.After].
 func (PassthroughCallInterceptor) After(ctx context.Context, callCtx *CallContext, resp *Response) error {
 	return nil
 }

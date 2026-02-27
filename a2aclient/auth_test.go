@@ -16,56 +16,52 @@ package a2aclient
 
 import (
 	"context"
-	"errors"
-	"net"
+	"iter"
+	"net/http/httptest"
 	"testing"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2agrpc"
-	"github.com/a2aproject/a2a-go/a2asrv"
-	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
-	"github.com/a2aproject/a2a-go/internal/testutil/testexecutor"
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2asrv"
+	"github.com/a2aproject/a2a-go/v1/internal/testutil/testexecutor"
 	"github.com/google/go-cmp/cmp"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/test/bufconn"
 )
 
-func startGRPCTestServer(t *testing.T, handler a2asrv.RequestHandler, listener *bufconn.Listener) {
-	s := grpc.NewServer()
-	grpcHandler := a2agrpc.NewHandler(handler)
-	grpcHandler.RegisterWith(s)
-	if err := s.Serve(listener); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
-		t.Logf("Server exited with error: %v", err)
-	}
+// JSONRPC
+func startJSONRPCTestServer(t *testing.T, handler a2asrv.RequestHandler) *httptest.Server {
+	t.Helper()
+	jsonrpcHandler := a2asrv.NewJSONRPCHandler(handler)
+	server := httptest.NewServer(jsonrpcHandler)
+	t.Cleanup(server.Close)
+	return server
 }
 
-func withTestGRPCTransport(listener *bufconn.Listener) FactoryOption {
-	return WithGRPCTransport(
-		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
-			return listener.Dial()
-		}),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
+func withTestJSONRPCTransport() FactoryOption {
+	return WithJSONRPCTransport(nil)
 }
 
-func TestAuth_GRPC(t *testing.T) {
+func TestAuth_JSONRPC(t *testing.T) {
 	ctx := t.Context()
-	listener := bufconn.Listen(1024 * 1024)
 
 	var capturedCallContext *a2asrv.CallContext
-	executor := testexecutor.FromFunction(func(ctx context.Context, reqCtx *a2asrv.RequestContext, q eventqueue.Queue) error {
-		capturedCallContext, _ = a2asrv.CallContextFrom(ctx)
-		return q.Write(ctx, a2a.NewMessage(a2a.MessageRoleAgent))
+	executor := testexecutor.FromFunction(func(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+		return func(yield func(a2a.Event, error) bool) {
+			capturedCallContext, _ = a2asrv.CallContextFrom(ctx)
+			yield(a2a.NewMessage(a2a.MessageRoleAgent), nil)
+		}
 	})
 	handler := a2asrv.NewHandler(executor)
-	go startGRPCTestServer(t, handler, listener)
+	server := startJSONRPCTestServer(t, handler)
 
 	schemeName := a2a.SecuritySchemeName("oauth2")
 	card := &a2a.AgentCard{
-		PreferredTransport: a2a.TransportProtocolGRPC,
-		URL:                "passthrough:///bufnet",
-		Security:           []a2a.SecurityRequirements{{schemeName: []string{}}},
+		SupportedInterfaces: []*a2a.AgentInterface{
+			{
+				ProtocolBinding: a2a.TransportProtocolJSONRPC,
+				ProtocolVersion: a2a.Version,
+				URL:             server.URL,
+			},
+		},
+		SecurityRequirements: []a2a.SecurityRequirements{{schemeName: []string{}}},
 		SecuritySchemes: a2a.NamedSecuritySchemes{
 			schemeName: a2a.OAuth2SecurityScheme{},
 		},
@@ -75,8 +71,8 @@ func TestAuth_GRPC(t *testing.T) {
 	client, err := NewFromCard(
 		ctx,
 		card,
-		withTestGRPCTransport(listener),
-		WithInterceptors(&AuthInterceptor{Service: credStore}),
+		withTestJSONRPCTransport(),
+		WithCallInterceptors(&AuthInterceptor{Service: credStore}),
 	)
 	if err != nil {
 		t.Fatalf("a2aclient.NewFromCard() error = %v", err)
@@ -86,15 +82,15 @@ func TestAuth_GRPC(t *testing.T) {
 	sessionID := SessionID("abcd")
 	credStore.Set(sessionID, schemeName, AuthCredential(token))
 
-	ctx = WithSessionID(ctx, sessionID)
-	_, err = client.SendMessage(ctx, &a2a.MessageSendParams{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "test"})})
+	ctx = AttachSessionID(ctx, sessionID)
+	_, err = client.SendMessage(ctx, &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("test"))})
 	if err != nil {
 		t.Fatalf("client.SendMessage() error = %v", err)
 	}
 
-	auth, _ := capturedCallContext.RequestMeta().Get("authorization")
+	auth, _ := capturedCallContext.ServiceParams().Get("authorization")
 	if diff := cmp.Diff([]string{"Bearer " + token}, auth); diff != "" {
-		t.Fatalf("RequestMeta[authorization] wrong value = %v, want = %v", auth, []string{"Bearer " + token})
+		t.Fatalf("ServiceParams[authorization] wrong value = %v, want = %v", auth, []string{"Bearer " + token})
 	}
 }
 
@@ -112,7 +108,7 @@ func TestAuthInterceptor(t *testing.T) {
 		sid    SessionID
 		stored []*storedCred
 		card   *a2a.AgentCard
-		want   CallMeta
+		want   ServiceParams
 	}{
 		{
 			name: "http auth",
@@ -123,12 +119,12 @@ func TestAuthInterceptor(t *testing.T) {
 				cred:   AuthCredential("secret"),
 			}},
 			card: &a2a.AgentCard{
-				Security: []a2a.SecurityRequirements{{toSchemeName("test"): []string{}}},
+				SecurityRequirements: []a2a.SecurityRequirements{{toSchemeName("test"): []string{}}},
 				SecuritySchemes: a2a.NamedSecuritySchemes{
 					toSchemeName("test"): a2a.HTTPAuthSecurityScheme{},
 				},
 			},
-			want: CallMeta{"Authorization": []string{"Bearer secret"}},
+			want: ServiceParams{"Authorization": []string{"Bearer secret"}},
 		},
 		{
 			name: "ouath2",
@@ -139,12 +135,12 @@ func TestAuthInterceptor(t *testing.T) {
 				cred:   AuthCredential("secret"),
 			}},
 			card: &a2a.AgentCard{
-				Security: []a2a.SecurityRequirements{{toSchemeName("test"): []string{}}},
+				SecurityRequirements: []a2a.SecurityRequirements{{toSchemeName("test"): []string{}}},
 				SecuritySchemes: a2a.NamedSecuritySchemes{
 					toSchemeName("test"): a2a.OAuth2SecurityScheme{},
 				},
 			},
-			want: CallMeta{"Authorization": []string{"Bearer secret"}},
+			want: ServiceParams{"Authorization": []string{"Bearer secret"}},
 		},
 		{
 			name: "api key",
@@ -155,12 +151,12 @@ func TestAuthInterceptor(t *testing.T) {
 				cred:   AuthCredential("secret"),
 			}},
 			card: &a2a.AgentCard{
-				Security: []a2a.SecurityRequirements{{toSchemeName("test"): []string{}}},
+				SecurityRequirements: []a2a.SecurityRequirements{{toSchemeName("test"): []string{}}},
 				SecuritySchemes: a2a.NamedSecuritySchemes{
 					toSchemeName("test"): a2a.APIKeySecurityScheme{Name: "X-Custom-Auth"},
 				},
 			},
-			want: CallMeta{"X-Custom-Auth": []string{"secret"}},
+			want: ServiceParams{"X-Custom-Auth": []string{"secret"}},
 		},
 		{
 			name: "first credential chosen",
@@ -178,7 +174,7 @@ func TestAuthInterceptor(t *testing.T) {
 				},
 			},
 			card: &a2a.AgentCard{
-				Security: []a2a.SecurityRequirements{
+				SecurityRequirements: []a2a.SecurityRequirements{
 					{toSchemeName("test"): []string{}},
 					{toSchemeName("test-2"): []string{}},
 					{toSchemeName("test-3"): []string{}},
@@ -189,17 +185,17 @@ func TestAuthInterceptor(t *testing.T) {
 					toSchemeName("test-3"): a2a.APIKeySecurityScheme{Name: "X-Custom-Auth"},
 				},
 			},
-			want: CallMeta{"Authorization": []string{"Bearer secret-2"}},
+			want: ServiceParams{"Authorization": []string{"Bearer secret-2"}},
 		},
 		{
 			name: "no session",
 			card: &a2a.AgentCard{
-				Security: []a2a.SecurityRequirements{{toSchemeName("test"): []string{}}},
+				SecurityRequirements: []a2a.SecurityRequirements{{toSchemeName("test"): []string{}}},
 				SecuritySchemes: a2a.NamedSecuritySchemes{
 					toSchemeName("test"): a2a.APIKeySecurityScheme{Name: "X-Custom-Auth"},
 				},
 			},
-			want: CallMeta{},
+			want: ServiceParams{},
 		},
 		{
 			name: "different session",
@@ -210,12 +206,12 @@ func TestAuthInterceptor(t *testing.T) {
 				cred:   AuthCredential("secret"),
 			}},
 			card: &a2a.AgentCard{
-				Security: []a2a.SecurityRequirements{{toSchemeName("test"): []string{}}},
+				SecurityRequirements: []a2a.SecurityRequirements{{toSchemeName("test"): []string{}}},
 				SecuritySchemes: a2a.NamedSecuritySchemes{
 					toSchemeName("test"): a2a.APIKeySecurityScheme{Name: "X-Custom-Auth"},
 				},
 			},
-			want: CallMeta{},
+			want: ServiceParams{},
 		},
 		{
 			name: "no card",
@@ -225,7 +221,7 @@ func TestAuthInterceptor(t *testing.T) {
 				scheme: toSchemeName("test"),
 				cred:   AuthCredential("secret"),
 			}},
-			want: CallMeta{},
+			want: ServiceParams{},
 		},
 		{
 			name: "no matching credential",
@@ -236,12 +232,12 @@ func TestAuthInterceptor(t *testing.T) {
 				cred:   AuthCredential("secret"),
 			}},
 			card: &a2a.AgentCard{
-				Security: []a2a.SecurityRequirements{{toSchemeName("test"): []string{}}},
+				SecurityRequirements: []a2a.SecurityRequirements{{toSchemeName("test"): []string{}}},
 				SecuritySchemes: a2a.NamedSecuritySchemes{
 					toSchemeName("test"): a2a.OAuth2SecurityScheme{},
 				},
 			},
-			want: CallMeta{},
+			want: ServiceParams{},
 		},
 		{
 			name: "no security requirements",
@@ -256,7 +252,7 @@ func TestAuthInterceptor(t *testing.T) {
 					toSchemeName("test"): a2a.OAuth2SecurityScheme{},
 				},
 			},
-			want: CallMeta{},
+			want: ServiceParams{},
 		},
 		{
 			name: "no security schemes",
@@ -267,19 +263,19 @@ func TestAuthInterceptor(t *testing.T) {
 				cred:   AuthCredential("secret"),
 			}},
 			card: &a2a.AgentCard{
-				Security: []a2a.SecurityRequirements{{toSchemeName("test"): []string{}}},
+				SecurityRequirements: []a2a.SecurityRequirements{{toSchemeName("test"): []string{}}},
 			},
-			want: CallMeta{},
+			want: ServiceParams{},
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			callMeta := CallMeta{}
+			params := ServiceParams{}
 
 			ctx := t.Context()
 			if tc.sid != "" {
-				ctx = WithSessionID(ctx, tc.sid)
+				ctx = AttachSessionID(ctx, tc.sid)
 			}
 
 			credStore := NewInMemoryCredentialsStore()
@@ -288,13 +284,13 @@ func TestAuthInterceptor(t *testing.T) {
 			}
 
 			interceptor := &AuthInterceptor{Service: credStore}
-			_, err := interceptor.Before(ctx, &Request{Meta: callMeta, Card: tc.card})
+			_, _, err := interceptor.Before(ctx, &Request{ServiceParams: params, Card: tc.card})
 			if err != nil {
 				t.Errorf("interceptor.Before() error = %v", err)
 			}
 
-			if diff := cmp.Diff(tc.want, callMeta); diff != "" {
-				t.Errorf("wrong CallMeta (+got,-want) diff = %s", diff)
+			if diff := cmp.Diff(tc.want, params); diff != "" {
+				t.Errorf("wrong ServiceParams (+got,-want) diff = %s", diff)
 			}
 		})
 	}

@@ -19,27 +19,25 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/a2aproject/a2a-go/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2a"
 )
 
-// Used to store CallMeta in context.Context after all the interceptors were applied.
-type callMetaKey struct{}
-
-// CallMeta holds things like auth headers and signatures.
+// ServiceParams holds horizontally applicable context or parameters with case-insensitive keys.
+// The transmission mechanism for these service parameter key-value pairs is defined by the specific protocol binding.
 // In jsonrpc it is passed as HTTP headers, in gRPC it becomes a part of [context.Context].
-// Custom protocol implementations can use [CallMetaFrom] to access this data and
+// Custom protocol implementations can use [ServiceParams] to access this data and
 // perform the operations necessary for attaching it to the request.
-type CallMeta map[string][]string
+type ServiceParams map[string][]string
 
 // Get performs case-insensitive lookup or the provided key. Returns nil if value is not present.
-func (m CallMeta) Get(key string) []string {
+func (m ServiceParams) Get(key string) []string {
 	val := m[strings.ToLower(key)]
 	return val
 }
 
 // Append appends the provided values to the list of values associated with the key.
 // Duplicates values will not be added. Key matching is case-insensitive.
-func (m CallMeta) Append(key string, vals ...string) {
+func (m ServiceParams) Append(key string, vals ...string) {
 	result := m.Get(key)
 	for _, v := range vals {
 		if slices.Contains(result, v) {
@@ -50,14 +48,26 @@ func (m CallMeta) Append(key string, vals ...string) {
 	m[strings.ToLower(key)] = result
 }
 
+func (m ServiceParams) clone() ServiceParams {
+	if m == nil {
+		return nil
+	}
+	c := make(ServiceParams, len(m))
+	for k, v := range m {
+		c[k] = slices.Clone(v)
+	}
+	return c
+}
+
 // Request represents a transport-agnostic request to be sent to A2A server.
 type Request struct {
 	// Method is the name of the method invoked on the A2A-server.
 	Method string
 	// BaseURL is the URL of the agent interface to which the Client is connected.
 	BaseURL string
-	// CallMeta holds request metadata like auth headers and signatures.
-	Meta CallMeta
+	// ServiceParams holds horizontally applicable context or parameters with case-insensitive keys.
+	// The transmission mechanism for these service parameter key-value pairs is defined by the specific protocol binding
+	ServiceParams ServiceParams
 	// Card is the AgentCard of the agent the client is connected to. Might be nil if Client was
 	// created directly from server URL and extended AgentCard was never fetched.
 	Card *a2a.AgentCard
@@ -73,8 +83,9 @@ type Response struct {
 	BaseURL string
 	// Err is the error response. It is nil for successful invocations.
 	Err error
-	// CallMeta holds request metadata like auth headers and signatures.
-	Meta CallMeta
+	// ServiceParams holds horizontally applicable context or parameters with case-insensitive keys.
+	// The transmission mechanism for these service parameter key-value pairs is defined by the specific protocol binding
+	ServiceParams ServiceParams
 	// Card is the AgentCard of the agent the client is connected to. Might be nil if Client was
 	// created directly from server URL and extended AgentCard was never fetched.
 	Card *a2a.AgentCard
@@ -82,56 +93,55 @@ type Response struct {
 	Payload any
 }
 
-// CallInterceptor can be attached to an [Client].
+// CallInterceptor can be attached to a [Client].
 // If multiple interceptors are added:
 //   - Before will be executed in the order of attachment sequentially.
 //   - After will be executed in the reverse order sequentially.
 type CallInterceptor interface {
 	// Before allows to observe, modify or reject a Request.
 	// A new context.Context can be returned to pass information to After.
-	Before(ctx context.Context, req *Request) (context.Context, error)
+	// If either the result (2nd return value) or the error (3rd return value) is non nil,
+	// the network request will not be made and the value will be returned to the caller.
+	Before(ctx context.Context, req *Request) (context.Context, any, error)
 
 	// After allows to observe, modify or reject a Response.
 	After(ctx context.Context, resp *Response) error
 }
 
-// CallMetaFrom allows [Transport] implementations to access CallMeta after all the interceptors were applied.
-func CallMetaFrom(ctx context.Context) (CallMeta, bool) {
-	meta, ok := ctx.Value(callMetaKey{}).(CallMeta)
-	return meta, ok
-}
+type serviceParamsKeyType struct{}
 
-func withCallMeta(ctx context.Context, meta CallMeta) context.Context {
-	return context.WithValue(ctx, callMetaKey{}, meta)
-}
-
-// NewCallMetaInjector creates a [CallInterceptor] which attaches the provided meta to all requests.
-func NewStaticCallMetaInjector(meta CallMeta) CallInterceptor {
-	return &callMetaInjector{inject: meta}
-}
-
-type callMetaInjector struct {
-	PassthroughInterceptor
-	inject CallMeta
-}
-
-func (mi *callMetaInjector) Before(ctx context.Context, req *Request) (context.Context, error) {
-	for k, values := range mi.inject {
-		req.Meta.Append(k, values...)
+// AttachServiceParams creates a new context with service parameters attached to it.
+// These parameters will be passed to the [Transport], where implementation is responsible
+// for serializing them according to the protocol binding.
+// [CallInterceptor]-s will be able to modify params before they are passed to the [Transport].
+func AttachServiceParams(ctx context.Context, params ServiceParams) context.Context {
+	existing := serviceParamsCloneFrom(ctx)
+	for k, values := range params {
+		existing.Append(k, values...)
 	}
-	return ctx, nil
+	return context.WithValue(ctx, serviceParamsKeyType{}, existing)
 }
 
-// PassthroughInterceptor can be used by CallInterceptor implementers who don't need all methods.
+func serviceParamsCloneFrom(ctx context.Context) ServiceParams {
+	params, ok := ctx.Value(serviceParamsKeyType{}).(ServiceParams)
+	if !ok {
+		return make(ServiceParams)
+	}
+	return params.clone()
+}
+
+// PassthroughInterceptor can be used by [CallInterceptor] implementers who don't need all methods.
 // The struct can be embedded for providing a no-op implementation.
 type PassthroughInterceptor struct{}
 
 var _ CallInterceptor = (*PassthroughInterceptor)(nil)
 
-func (PassthroughInterceptor) Before(ctx context.Context, req *Request) (context.Context, error) {
-	return ctx, nil
+// Before implements the [CallInterceptor].
+func (PassthroughInterceptor) Before(ctx context.Context, req *Request) (context.Context, any, error) {
+	return ctx, nil, nil
 }
 
+// After implements the [CallInterceptor].
 func (PassthroughInterceptor) After(ctx context.Context, resp *Response) error {
 	return nil
 }

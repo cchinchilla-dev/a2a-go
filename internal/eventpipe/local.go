@@ -16,40 +16,49 @@ package eventpipe
 
 import (
 	"context"
-	"fmt"
 	"sync/atomic"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2asrv/eventqueue"
 )
 
 const defaultBufferSize = 1024
 
+// Reader is an interface for reading events.
 type Reader interface {
 	// Read dequeues an event or blocks if the queue is empty.
 	Read(ctx context.Context) (a2a.Event, error)
+}
+
+// Writer is an interface for writing events.
+type Writer interface {
+	// Write enqueues an event or blocks if the queue is full.
+	Write(ctx context.Context, event a2a.Event) error
 }
 
 type localOptions struct {
 	bufferSize int
 }
 
+// LocalPipeOption is a functional option for configuring a local pipe.
 type LocalPipeOption func(*localOptions)
 
+// WithBufferSize configures the size of the event buffer for the local pipe.
 func WithBufferSize(size int) LocalPipeOption {
 	return func(opts *localOptions) {
 		opts.bufferSize = size
 	}
 }
 
+// Local represents a local event pipe with a reader and a writer.
 type Local struct {
 	Reader Reader
-	// TODO(yarolegovich): change to eventqueue.Writer when AgentExecutor interface is updated
-	Writer eventqueue.Queue
+	Writer Writer
 
 	closeWriter func()
 }
 
+// NewLocal creates a new local event pipe.
 func NewLocal(opts ...LocalPipeOption) *Local {
 	options := &localOptions{bufferSize: defaultBufferSize}
 	for _, opt := range opts {
@@ -73,7 +82,7 @@ type pipeWriter struct {
 	closeChan chan struct{}
 }
 
-var _ eventqueue.Queue = (*pipeWriter)(nil)
+var _ Writer = (*pipeWriter)(nil)
 
 func (w *pipeWriter) Write(ctx context.Context, event a2a.Event) error {
 	if w.closed.Load() {
@@ -88,18 +97,6 @@ func (w *pipeWriter) Write(ctx context.Context, event a2a.Event) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-}
-
-func (w *pipeWriter) WriteVersioned(ctx context.Context, event a2a.Event, version a2a.TaskVersion) error {
-	return fmt.Errorf("versioned write is not allowed")
-}
-
-func (w *pipeWriter) Read(ctx context.Context) (a2a.Event, a2a.TaskVersion, error) {
-	return nil, a2a.TaskVersionMissing, fmt.Errorf("only queue write is allowed")
-}
-
-func (w *pipeWriter) Close() error {
-	return fmt.Errorf("only queue write is allowed")
 }
 
 func (w *pipeWriter) close() {
@@ -124,6 +121,7 @@ func (r *pipeReader) Read(ctx context.Context) (a2a.Event, error) {
 	}
 }
 
+// Close closes the local event pipe.
 func (q *Local) Close() {
 	q.closeWriter()
 }

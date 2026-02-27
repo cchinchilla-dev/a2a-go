@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package main provides a TCK core agent implementation for testing.
 package main
 
 import (
@@ -25,9 +26,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2agrpc"
-	"github.com/a2aproject/a2a-go/a2asrv"
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2agrpc/v1"
+	"github.com/a2aproject/a2a-go/v1/a2asrv"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 )
@@ -35,28 +36,25 @@ import (
 type intercepter struct{}
 type msgContextKeyType struct{}
 
-func (i *intercepter) Before(ctx context.Context, callCtx *a2asrv.CallContext, req *a2asrv.Request) (context.Context, error) {
+func (i *intercepter) Before(ctx context.Context, callCtx *a2asrv.CallContext, req *a2asrv.Request) (context.Context, any, error) {
 	if callCtx.Method() == "OnSendMessage" {
-		sendParams, ok := req.Payload.(*a2a.MessageSendParams)
-		if !ok || sendParams == nil || sendParams.Message == nil {
-			return ctx, nil
-		}
+		sendParams := req.Payload.(*a2a.SendMessageRequest)
 		if sendParams.Config == nil {
-			sendParams.Config = &a2a.MessageSendConfig{}
+			sendParams.Config = &a2a.SendMessageConfig{}
 		}
 		if sendParams.Config.Blocking == nil {
 			blocking := false
 			sendParams.Config.Blocking = &blocking
 		}
-		return context.WithValue(ctx, msgContextKeyType{}, sendParams.Message.ID), nil
+		return context.WithValue(ctx, msgContextKeyType{}, sendParams.Message.ID), nil, nil
 	}
-	return ctx, nil
+	return ctx, nil, nil
 }
 
 func (i *intercepter) After(ctx context.Context, callCtx *a2asrv.CallContext, resp *a2asrv.Response) error {
 	id, ok := ctx.Value(msgContextKeyType{}).(string)
 	if ok && (strings.Contains(id, "continuation") || strings.Contains(id, "test-history-message-")) {
-		resp.Payload = a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "Execution in progress"})
+		resp.Payload = a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("Execution in progress"))
 		resp.Err = nil
 	}
 	return nil
@@ -83,11 +81,12 @@ func main() {
 	}
 
 	agentCard := &a2a.AgentCard{
-		Name:               "TCK Core Agent",
-		Description:        "A complete A2A agent implementation designed specifically for testing with the A2A Technology Compatibility Kit (TCK)",
-		URL:                cardUrl,
+		Name:        "TCK Core Agent",
+		Description: "A complete A2A agent implementation designed specifically for testing with the A2A Technology Compatibility Kit (TCK)",
+		SupportedInterfaces: []*a2a.AgentInterface{
+			a2a.NewAgentInterface(cardUrl, preferredTransport),
+		},
 		Version:            "1.0.0",
-		PreferredTransport: preferredTransport,
 		DefaultInputModes:  []string{"text"},
 		DefaultOutputModes: []string{"text"},
 		Capabilities:       a2a.AgentCapabilities{Streaming: true},
@@ -103,7 +102,7 @@ func main() {
 		},
 	}
 
-	requestHandler := a2asrv.NewHandler(agentExecutor, a2asrv.WithExtendedAgentCard(agentCard), a2asrv.WithCallInterceptor(&intercepter{}))
+	requestHandler := a2asrv.NewHandler(agentExecutor, a2asrv.WithExtendedAgentCard(agentCard), a2asrv.WithCallInterceptors(&intercepter{}))
 
 	var group errgroup.Group
 	group.Go(func() error {

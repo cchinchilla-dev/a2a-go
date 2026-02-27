@@ -23,25 +23,27 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2asrv"
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2asrv"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 )
 
 var (
-	port   = flag.Int("port", 9001, "Port for a gGRPC A2A server to listen on.")
+	port   = flag.Int("port", 9001, "Port for a JSONRPC A2A server to listen on.")
 	dbName = flag.String("db", "", "Database connection string (DSN).")
 )
 
 func main() {
 	flag.Parse()
 
+	addr := fmt.Sprintf("http://127.0.0.1:%d/invoke", *port)
 	agentCard := &a2a.AgentCard{
-		Name:               "A2A Cluster",
-		URL:                fmt.Sprintf("http://127.0.0.1:%d/invoke", *port),
-		PreferredTransport: a2a.TransportProtocolJSONRPC,
-		Capabilities:       a2a.AgentCapabilities{Streaming: true},
+		Name: "A2A Cluster",
+		SupportedInterfaces: []*a2a.AgentInterface{
+			a2a.NewAgentInterface(addr, a2a.TransportProtocolJSONRPC),
+		},
+		Capabilities: a2a.AgentCapabilities{Streaming: true},
 	}
 
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))

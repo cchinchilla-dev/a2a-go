@@ -19,11 +19,12 @@ import (
 	"fmt"
 	"iter"
 	"log/slog"
+	"slices"
 
 	"github.com/google/uuid"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/log"
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/log"
 )
 
 // InterceptedHandler implements [RequestHandler]. It can be used to attach call interceptors and initialize
@@ -36,51 +37,43 @@ type InterceptedHandler struct {
 	// Logger is the logger which will be accessible from request scope context using log package
 	// methods. Defaults to slog.Default() if not set.
 	Logger *slog.Logger
+
+	capabilities *a2a.AgentCapabilities
+}
+
+type interceptBeforeResult[Req any, Resp any] struct {
+	reqOverride   Req
+	earlyResponse *Resp
+	earlyErr      error
 }
 
 var _ RequestHandler = (*InterceptedHandler)(nil)
 
-func (h *InterceptedHandler) OnGetTask(ctx context.Context, query *a2a.TaskQueryParams) (*a2a.Task, error) {
-	ctx, callCtx := withMethodCallContext(ctx, "OnGetTask")
-	if query != nil {
-		ctx = h.withLoggerContext(ctx, slog.String("task_id", string(query.ID)))
-	}
-	ctx, interceptedQuery, err := interceptBefore(ctx, h, callCtx, query)
-	if err != nil {
-		return nil, err
-	}
-	response, err := h.Handler.OnGetTask(ctx, interceptedQuery)
-	return interceptAfter(ctx, h, callCtx, response, err)
+// GetTask implements RequestHandler.
+func (h *InterceptedHandler) GetTask(ctx context.Context, req *a2a.GetTaskRequest) (*a2a.Task, error) {
+	ctx, callCtx := attachMethodCallContext(ctx, "GetTask", req.Tenant)
+	ctx = h.withLoggerContext(ctx, slog.String("task_id", string(req.ID)))
+	return doCall(ctx, callCtx, h, req, h.Handler.GetTask)
 }
 
-func (h *InterceptedHandler) OnListTasks(ctx context.Context, req *a2a.ListTasksRequest) (*a2a.ListTasksResponse, error) {
-	ctx, callCtx := withMethodCallContext(ctx, "OnListTasks")
+// ListTasks implements RequestHandler.
+func (h *InterceptedHandler) ListTasks(ctx context.Context, req *a2a.ListTasksRequest) (*a2a.ListTasksResponse, error) {
+	ctx, callCtx := attachMethodCallContext(ctx, "ListTasks", req.Tenant)
 	ctx = h.withLoggerContext(ctx)
-	ctx, interceptedReq, err := interceptBefore(ctx, h, callCtx, req)
-	if err != nil {
-		return nil, err
-	}
-	response, err := h.Handler.OnListTasks(ctx, interceptedReq)
-	return interceptAfter(ctx, h, callCtx, response, err)
+	return doCall(ctx, callCtx, h, req, h.Handler.ListTasks)
 }
 
-func (h *InterceptedHandler) OnCancelTask(ctx context.Context, params *a2a.TaskIDParams) (*a2a.Task, error) {
-	ctx, callCtx := withMethodCallContext(ctx, "OnCancelTask")
-	if params != nil {
-		ctx = h.withLoggerContext(ctx, slog.String("task_id", string(params.ID)))
-	}
-	ctx, interceptedParams, err := interceptBefore(ctx, h, callCtx, params)
-	if err != nil {
-		return nil, err
-	}
-	response, err := h.Handler.OnCancelTask(ctx, interceptedParams)
-	return interceptAfter(ctx, h, callCtx, response, err)
+// CancelTask implements RequestHandler.
+func (h *InterceptedHandler) CancelTask(ctx context.Context, req *a2a.CancelTaskRequest) (*a2a.Task, error) {
+	ctx, callCtx := attachMethodCallContext(ctx, "CancelTask", req.Tenant)
+	ctx = h.withLoggerContext(ctx, slog.String("task_id", string(req.ID)))
+	return doCall(ctx, callCtx, h, req, h.Handler.CancelTask)
 }
 
-func (h *InterceptedHandler) OnSendMessage(ctx context.Context, params *a2a.MessageSendParams) (a2a.SendMessageResult, error) {
-	ctx, callCtx := withMethodCallContext(ctx, "OnSendMessage")
-	if params != nil && params.Message != nil {
-		msg := params.Message
+// SendMessage implements RequestHandler.
+func (h *InterceptedHandler) SendMessage(ctx context.Context, req *a2a.SendMessageRequest) (a2a.SendMessageResult, error) {
+	ctx, callCtx := attachMethodCallContext(ctx, "SendMessage", req.Tenant)
+	if msg := req.Message; msg != nil {
 		ctx = h.withLoggerContext(
 			ctx,
 			slog.String("message_id", msg.ID),
@@ -90,19 +83,19 @@ func (h *InterceptedHandler) OnSendMessage(ctx context.Context, params *a2a.Mess
 	} else {
 		ctx = h.withLoggerContext(ctx)
 	}
-	ctx, interceptedParams, err := interceptBefore(ctx, h, callCtx, params)
-	if err != nil {
-		return nil, err
-	}
-	response, err := h.Handler.OnSendMessage(ctx, interceptedParams)
-	return interceptAfter(ctx, h, callCtx, response, err)
+	return doCall(ctx, callCtx, h, req, h.Handler.SendMessage)
 }
 
-func (h *InterceptedHandler) OnSendMessageStream(ctx context.Context, params *a2a.MessageSendParams) iter.Seq2[a2a.Event, error] {
+// SendStreamingMessage implements RequestHandler.
+func (h *InterceptedHandler) SendStreamingMessage(ctx context.Context, req *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
-		ctx, callCtx := withMethodCallContext(ctx, "OnSendMessageStream")
-		if params != nil && params.Message != nil {
-			msg := params.Message
+		ctx, callCtx := attachMethodCallContext(ctx, "SendStreamingMessage", req.Tenant)
+		if err := checkRequiredExtensions(h, callCtx); err != nil {
+			yield(nil, err)
+			return
+		}
+		if req.Message != nil {
+			msg := req.Message
 			ctx = h.withLoggerContext(
 				ctx,
 				slog.String("message_id", msg.ID),
@@ -112,13 +105,17 @@ func (h *InterceptedHandler) OnSendMessageStream(ctx context.Context, params *a2
 		} else {
 			ctx = h.withLoggerContext(ctx)
 		}
-		ctx, interceptedParams, err := interceptBefore(ctx, h, callCtx, params)
-		if err != nil {
-			yield(nil, err)
+		ctx, res := interceptBefore[*a2a.SendMessageRequest, a2a.SendMessageResult](ctx, h, callCtx, req)
+		if res.earlyErr != nil {
+			yield(nil, res.earlyErr)
 			return
 		}
-		for event, err := range h.Handler.OnSendMessageStream(ctx, interceptedParams) {
-			interceptedEvent, errOverride := interceptAfter(ctx, h, callCtx, event, err)
+		if res.earlyResponse != nil {
+			yield(*res.earlyResponse, nil)
+			return
+		}
+		for event, err := range h.Handler.SendStreamingMessage(ctx, res.reqOverride) {
+			interceptedEvent, errOverride := interceptAfter(ctx, h.Interceptors, callCtx, event, err)
 			if errOverride != nil {
 				yield(nil, errOverride)
 				return
@@ -130,19 +127,26 @@ func (h *InterceptedHandler) OnSendMessageStream(ctx context.Context, params *a2
 	}
 }
 
-func (h *InterceptedHandler) OnResubscribeToTask(ctx context.Context, params *a2a.TaskIDParams) iter.Seq2[a2a.Event, error] {
+// SubscribeToTask implements RequestHandler.
+func (h *InterceptedHandler) SubscribeToTask(ctx context.Context, req *a2a.SubscribeToTaskRequest) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
-		ctx, callCtx := withMethodCallContext(ctx, "OnResubscribeToTask")
-		if params != nil {
-			ctx = h.withLoggerContext(ctx, slog.String("task_id", string(params.ID)))
-		}
-		ctx, interceptedParams, err := interceptBefore(ctx, h, callCtx, params)
-		if err != nil {
+		ctx, callCtx := attachMethodCallContext(ctx, "SubscribeToTask", req.Tenant)
+		if err := checkRequiredExtensions(h, callCtx); err != nil {
 			yield(nil, err)
 			return
 		}
-		for event, err := range h.Handler.OnResubscribeToTask(ctx, interceptedParams) {
-			interceptedEvent, errOverride := interceptAfter(ctx, h, callCtx, event, err)
+		ctx = h.withLoggerContext(ctx, slog.String("task_id", string(req.ID)))
+		ctx, res := interceptBefore[*a2a.SubscribeToTaskRequest, a2a.SendMessageResult](ctx, h, callCtx, req)
+		if res.earlyErr != nil {
+			yield(nil, res.earlyErr)
+			return
+		}
+		if res.earlyResponse != nil {
+			yield(*res.earlyResponse, nil)
+			return
+		}
+		for event, err := range h.Handler.SubscribeToTask(ctx, res.reqOverride) {
+			interceptedEvent, errOverride := interceptAfter(ctx, h.Interceptors, callCtx, event, err)
 			if errOverride != nil {
 				yield(nil, errOverride)
 				return
@@ -154,107 +158,105 @@ func (h *InterceptedHandler) OnResubscribeToTask(ctx context.Context, params *a2
 	}
 }
 
-func (h *InterceptedHandler) OnGetTaskPushConfig(ctx context.Context, params *a2a.GetTaskPushConfigParams) (*a2a.TaskPushConfig, error) {
-	ctx, callCtx := withMethodCallContext(ctx, "OnGetTaskPushConfig")
-	if params != nil {
-		ctx = h.withLoggerContext(ctx, slog.String("task_id", string(params.TaskID)))
-	}
-	ctx, interceptedParams, err := interceptBefore(ctx, h, callCtx, params)
-	if err != nil {
-		return nil, err
-	}
-	response, err := h.Handler.OnGetTaskPushConfig(ctx, interceptedParams)
-	return interceptAfter(ctx, h, callCtx, response, err)
+// GetTaskPushConfig implements RequestHandler.
+func (h *InterceptedHandler) GetTaskPushConfig(ctx context.Context, req *a2a.GetTaskPushConfigRequest) (*a2a.TaskPushConfig, error) {
+	ctx, callCtx := attachMethodCallContext(ctx, "GetTaskPushConfig", req.Tenant)
+	ctx = h.withLoggerContext(ctx, slog.String("task_id", string(req.TaskID)))
+	return doCall(ctx, callCtx, h, req, h.Handler.GetTaskPushConfig)
 }
 
-func (h *InterceptedHandler) OnListTaskPushConfig(ctx context.Context, params *a2a.ListTaskPushConfigParams) ([]*a2a.TaskPushConfig, error) {
-	ctx, callCtx := withMethodCallContext(ctx, "OnListTaskPushConfig")
-	if params != nil {
-		ctx = h.withLoggerContext(ctx, slog.String("task_id", string(params.TaskID)))
-	}
-	ctx, interceptedParams, err := interceptBefore(ctx, h, callCtx, params)
-	if err != nil {
-		return nil, err
-	}
-	response, err := h.Handler.OnListTaskPushConfig(ctx, interceptedParams)
-	return interceptAfter(ctx, h, callCtx, response, err)
+// ListTaskPushConfigs implements RequestHandler.
+func (h *InterceptedHandler) ListTaskPushConfigs(ctx context.Context, req *a2a.ListTaskPushConfigRequest) ([]*a2a.TaskPushConfig, error) {
+	ctx, callCtx := attachMethodCallContext(ctx, "ListTaskPushConfigs", req.Tenant)
+	ctx = h.withLoggerContext(ctx, slog.String("task_id", string(req.TaskID)))
+	return doCall(ctx, callCtx, h, req, h.Handler.ListTaskPushConfigs)
 }
 
-func (h *InterceptedHandler) OnSetTaskPushConfig(ctx context.Context, params *a2a.TaskPushConfig) (*a2a.TaskPushConfig, error) {
-	ctx, callCtx := withMethodCallContext(ctx, "OnSetTaskPushConfig")
-	if params != nil {
-		ctx = h.withLoggerContext(ctx, slog.String("task_id", string(params.TaskID)))
-	}
-	ctx, interceptedParams, err := interceptBefore(ctx, h, callCtx, params)
-	if err != nil {
-		return nil, err
-	}
-	response, err := h.Handler.OnSetTaskPushConfig(ctx, interceptedParams)
-	return interceptAfter(ctx, h, callCtx, response, err)
+// CreateTaskPushConfig implements RequestHandler.
+func (h *InterceptedHandler) CreateTaskPushConfig(ctx context.Context, req *a2a.CreateTaskPushConfigRequest) (*a2a.TaskPushConfig, error) {
+	ctx, callCtx := attachMethodCallContext(ctx, "CreateTaskPushConfig", req.Tenant)
+	ctx = h.withLoggerContext(ctx, slog.String("task_id", string(req.TaskID)))
+	return doCall(ctx, callCtx, h, req, h.Handler.CreateTaskPushConfig)
 }
 
-func (h *InterceptedHandler) OnDeleteTaskPushConfig(ctx context.Context, params *a2a.DeleteTaskPushConfigParams) error {
-	ctx, callCtx := withMethodCallContext(ctx, "OnDeleteTaskPushConfig")
-	if params != nil {
-		ctx = h.withLoggerContext(ctx, slog.String("task_id", string(params.TaskID)))
+// DeleteTaskPushConfig implements RequestHandler.
+func (h *InterceptedHandler) DeleteTaskPushConfig(ctx context.Context, req *a2a.DeleteTaskPushConfigRequest) error {
+	ctx, callCtx := attachMethodCallContext(ctx, "DeleteTaskPushConfig", req.Tenant)
+	ctx = h.withLoggerContext(ctx, slog.String("task_id", string(req.TaskID)))
+	ctx, res := interceptBefore[*a2a.DeleteTaskPushConfigRequest, struct{}](ctx, h, callCtx, req)
+	if res.earlyErr != nil {
+		return res.earlyErr
 	}
-	ctx, interceptedParams, err := interceptBefore(ctx, h, callCtx, params)
-	if err != nil {
+	if res.earlyResponse != nil {
+		return nil
+	}
+	if err := checkRequiredExtensions(h, callCtx); err != nil {
 		return err
 	}
-	err = h.Handler.OnDeleteTaskPushConfig(ctx, interceptedParams)
+	err := h.Handler.DeleteTaskPushConfig(ctx, res.reqOverride)
 	var emptyResponse struct{}
-	_, errOverride := interceptAfter(ctx, h, callCtx, emptyResponse, err)
-	if errOverride != nil {
-		return errOverride
-	}
-	return nil
+	_, errOverride := interceptAfter(ctx, h.Interceptors, callCtx, emptyResponse, err)
+	return errOverride
 }
 
-func (h *InterceptedHandler) OnGetExtendedAgentCard(ctx context.Context) (*a2a.AgentCard, error) {
-	ctx, callCtx := withMethodCallContext(ctx, "OnGetExtendedAgentCard")
+// GetExtendedAgentCard implements RequestHandler.
+func (h *InterceptedHandler) GetExtendedAgentCard(ctx context.Context, req *a2a.GetExtendedAgentCardRequest) (*a2a.AgentCard, error) {
+	ctx, callCtx := attachMethodCallContext(ctx, "GetExtendedAgentCard", req.Tenant)
 	ctx = h.withLoggerContext(ctx)
-
-	var req struct{}
-	ctx, _, err := interceptBefore(ctx, h, callCtx, req)
-	if err != nil {
-		return nil, err
-	}
-	response, err := h.Handler.OnGetExtendedAgentCard(ctx)
-	return interceptAfter(ctx, h, callCtx, response, err)
+	return doCall(ctx, callCtx, h, req, h.Handler.GetExtendedAgentCard)
 }
 
-func interceptBefore[T any](ctx context.Context, h *InterceptedHandler, callCtx *CallContext, payload T) (context.Context, T, error) {
+func interceptBefore[Req any, Resp any](ctx context.Context, h *InterceptedHandler, callCtx *CallContext, payload Req) (context.Context, interceptBeforeResult[Req, Resp]) {
 	request := &Request{Payload: payload}
 
-	var zero T
-	for _, interceptor := range h.Interceptors {
-		localCtx, err := interceptor.Before(ctx, callCtx, request)
-		if err != nil {
-			return ctx, zero, err
+	var zeroReq Req
+	outcome := interceptBeforeResult[Req, Resp]{
+		reqOverride:   zeroReq,
+		earlyResponse: nil,
+		earlyErr:      nil,
+	}
+
+	for i, interceptor := range h.Interceptors {
+		localCtx, result, err := interceptor.Before(ctx, callCtx, request)
+		if err != nil || result != nil {
+			var typedResult Resp
+			if result != nil {
+				r, ok := result.(Resp)
+				if !ok {
+					outcome.earlyErr = fmt.Errorf("result type changed from %T to %T", result, typedResult)
+					return ctx, outcome
+				}
+				typedResult = r
+			}
+			interceptors := h.Interceptors[:i+1]
+			resp, err := interceptAfter(ctx, interceptors, callCtx, typedResult, err)
+			outcome.earlyResponse = &resp
+			outcome.earlyErr = err
+			return ctx, outcome
 		}
 		ctx = localCtx
 	}
 
 	if request.Payload == nil {
-		return ctx, zero, nil
+		return ctx, outcome
 	}
 
-	typed, ok := request.Payload.(T)
+	typed, ok := request.Payload.(Req)
 	if !ok {
-		return ctx, zero, fmt.Errorf("payload type changed from %T to %T", payload, request.Payload)
+		outcome.earlyErr = fmt.Errorf("payload type changed from %T to %T", payload, request.Payload)
+		return ctx, outcome
 	}
 
-	return ctx, typed, nil
+	outcome.reqOverride = typed
+	return ctx, outcome
 }
 
-func interceptAfter[T any](ctx context.Context, h *InterceptedHandler, callCtx *CallContext, payload T, responseErr error) (T, error) {
+func interceptAfter[T any](ctx context.Context, interceptors []CallInterceptor, callCtx *CallContext, payload T, responseErr error) (T, error) {
 	response := &Response{Payload: payload, Err: responseErr}
 
 	var zero T
-	for i := range len(h.Interceptors) {
-		interceptor := h.Interceptors[len(h.Interceptors)-i-1]
-		if err := interceptor.After(ctx, callCtx, response); err != nil {
+	for i := len(interceptors) - 1; i >= 0; i-- {
+		if err := interceptors[i].After(ctx, callCtx, response); err != nil {
 			return zero, err
 		}
 	}
@@ -280,16 +282,56 @@ func (h *InterceptedHandler) withLoggerContext(ctx context.Context, attrs ...any
 	}
 	requestID := uuid.NewString()
 	withAttrs := logger.WithGroup("a2a").With(attrs...).With(slog.String("request_id", requestID))
-	return log.WithLogger(ctx, withAttrs)
+	return log.AttachLogger(ctx, withAttrs)
 }
 
-// withMethodCallContext is a private utility function which modifies CallContext.method if a CallContext
+// attachMethodCallContext is a private utility function which modifies CallContext.method if a CallContext
 // was passed by a transport implementation or initializes a new CallContext with the provided method.
-func withMethodCallContext(ctx context.Context, method string) (context.Context, *CallContext) {
+func attachMethodCallContext(ctx context.Context, method string, tenant string) (context.Context, *CallContext) {
 	callCtx, ok := CallContextFrom(ctx)
 	if !ok {
-		ctx, callCtx = WithCallContext(ctx, nil)
+		ctx, callCtx = NewCallContext(ctx, nil)
 	}
+
 	callCtx.method = method
+	if tenant != "" {
+		callCtx.tenant = tenant
+	}
 	return ctx, callCtx
+}
+
+func doCall[Req any, Resp any](
+	ctx context.Context, callCtx *CallContext, h *InterceptedHandler, req Req,
+	transportCall func(context.Context, Req) (Resp, error),
+) (Resp, error) {
+	ctx, res := interceptBefore[Req, Resp](ctx, h, callCtx, req)
+	if res.earlyErr != nil {
+		var zero Resp
+		return zero, res.earlyErr
+	}
+	if res.earlyResponse != nil {
+		return *res.earlyResponse, nil
+	}
+	if err := checkRequiredExtensions(h, callCtx); err != nil {
+		var zero Resp
+		return zero, err
+	}
+	response, err := transportCall(ctx, res.reqOverride)
+	return interceptAfter(ctx, h.Interceptors, callCtx, response, err)
+}
+
+func checkRequiredExtensions(h *InterceptedHandler, callCtx *CallContext) error {
+	if h.capabilities == nil || len(h.capabilities.Extensions) == 0 {
+		return nil
+	}
+	requestedURIs := callCtx.Extensions().RequestedURIs()
+	for _, ext := range h.capabilities.Extensions {
+		if ext.Required {
+			found := slices.Contains(requestedURIs, ext.URI)
+			if !found {
+				return a2a.ErrExtensionSupportRequired
+			}
+		}
+	}
+	return nil
 }

@@ -23,11 +23,11 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
-	"github.com/a2aproject/a2a-go/a2asrv/workqueue"
-	"github.com/a2aproject/a2a-go/internal/eventpipe"
-	"github.com/a2aproject/a2a-go/log"
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2asrv/eventqueue"
+	"github.com/a2aproject/a2a-go/v1/a2asrv/workqueue"
+	"github.com/a2aproject/a2a-go/v1/internal/eventpipe"
+	"github.com/a2aproject/a2a-go/v1/log"
 )
 
 type executionHandler struct {
@@ -61,7 +61,8 @@ func (h *executionHandler) processEvents(ctx context.Context) (a2a.SendMessageRe
 			if processResult.EventOverride != nil {
 				toEmit = processResult.EventOverride
 			}
-			if err := h.handledEventQueue.WriteVersioned(ctx, toEmit, processResult.TaskVersion); err != nil {
+			msg := &eventqueue.Message{Event: toEmit, TaskVersion: processResult.TaskVersion}
+			if err := h.handledEventQueue.Write(ctx, msg); err != nil {
 				log.Info(ctx, "execution context canceled during subscriber notification attempt", "cause", context.Cause(ctx))
 				return h.handleErrorFn(ctx, context.Cause(ctx))
 			}

@@ -17,7 +17,8 @@ package a2aext
 import (
 	"context"
 
-	"github.com/a2aproject/a2a-go/a2aclient"
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2aclient"
 )
 
 // NewActivator creates an [a2aclient.CallInterceptor] which requests extension activation
@@ -31,9 +32,11 @@ type activator struct {
 	extensionURI []string
 }
 
-func (c *activator) Before(ctx context.Context, req *a2aclient.Request) (context.Context, error) {
+// Before implements [a2aclient.CallInterceptor].
+// It checks if the server supports any of the configured extensions and appends them to the request ServiceParams.
+func (c *activator) Before(ctx context.Context, req *a2aclient.Request) (context.Context, any, error) {
 	if req.Card == nil || len(req.Card.Capabilities.Extensions) == 0 {
-		return ctx, nil
+		return ctx, nil, nil
 	}
 
 	var toAppend []string
@@ -43,8 +46,8 @@ func (c *activator) Before(ctx context.Context, req *a2aclient.Request) (context
 		}
 	}
 	if len(toAppend) > 0 {
-		req.Meta.Append(CallMetaKey, toAppend...)
+		req.ServiceParams.Append(a2a.SvcParamExtensions, toAppend...)
 	}
 
-	return ctx, nil
+	return ctx, nil, nil
 }

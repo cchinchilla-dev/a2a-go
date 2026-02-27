@@ -19,12 +19,13 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
-	"github.com/a2aproject/a2a-go/a2asrv/limiter"
-	"github.com/a2aproject/a2a-go/a2asrv/workqueue"
-	"github.com/a2aproject/a2a-go/internal/taskupdate"
-	"github.com/a2aproject/a2a-go/log"
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2asrv/eventqueue"
+	"github.com/a2aproject/a2a-go/v1/a2asrv/limiter"
+	"github.com/a2aproject/a2a-go/v1/a2asrv/taskstore"
+	"github.com/a2aproject/a2a-go/v1/a2asrv/workqueue"
+	"github.com/a2aproject/a2a-go/v1/internal/taskupdate"
+	"github.com/a2aproject/a2a-go/v1/log"
 )
 
 // DistributedManagerConfig contains configuration for A2A task execution
@@ -33,7 +34,7 @@ type DistributedManagerConfig struct {
 	WorkQueue         workqueue.Queue
 	QueueManager      eventqueue.Manager
 	Factory           Factory
-	TaskStore         TaskStore
+	TaskStore         taskstore.Store
 	ConcurrencyConfig limiter.ConcurrencyConfig
 	Logger            *slog.Logger
 	PanicHandler      PanicHandlerFn
@@ -43,7 +44,7 @@ type distributedManager struct {
 	workHandler  *workQueueHandler
 	workQueue    workqueue.Queue
 	queueManager eventqueue.Manager
-	taskStore    TaskStore
+	taskStore    taskstore.Store
 }
 
 var _ Manager = (*distributedManager)(nil)
@@ -60,34 +61,35 @@ func NewDistributedManager(cfg *DistributedManagerConfig) Manager {
 }
 
 func (m *distributedManager) Resubscribe(ctx context.Context, taskID a2a.TaskID) (Subscription, error) {
-	if _, _, err := m.taskStore.Get(ctx, taskID); err != nil {
+	if _, err := m.taskStore.Get(ctx, taskID); err != nil {
 		return nil, a2a.ErrTaskNotFound
 	}
-	queue, err := m.queueManager.GetOrCreate(ctx, taskID)
+	queue, err := m.queueManager.CreateReader(ctx, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get event queue: %w", err)
 	}
 	return newRemoteSubscription(queue, m.taskStore, taskID), nil
 }
 
-func (m *distributedManager) Execute(ctx context.Context, params *a2a.MessageSendParams) (Subscription, error) {
-	if params == nil || params.Message == nil {
+func (m *distributedManager) Execute(ctx context.Context, req *a2a.SendMessageRequest) (Subscription, error) {
+	if req == nil || req.Message == nil {
 		return nil, fmt.Errorf("message is required: %w", a2a.ErrInvalidParams)
 	}
 
 	var taskID a2a.TaskID
-	if len(params.Message.TaskID) == 0 {
+	if len(req.Message.TaskID) == 0 {
 		taskID = a2a.NewTaskID()
 	} else {
-		taskID = params.Message.TaskID
+		taskID = req.Message.TaskID
 	}
 
-	msg := params.Message
+	msg := req.Message
 	if msg.TaskID != "" {
-		storedTask, _, err := m.taskStore.Get(ctx, msg.TaskID)
+		taskStoreTask, err := m.taskStore.Get(ctx, msg.TaskID)
 		if err != nil {
 			return nil, fmt.Errorf("task loading failed: %w", err)
 		}
+		storedTask := taskStoreTask.Task
 		if storedTask == nil {
 			return nil, a2a.ErrTaskNotFound
 		}
@@ -101,15 +103,15 @@ func (m *distributedManager) Execute(ctx context.Context, params *a2a.MessageSen
 		}
 	}
 
-	queue, err := m.queueManager.GetOrCreate(ctx, taskID)
+	queue, err := m.queueManager.CreateReader(ctx, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get or create queue: %w", err)
 	}
 
 	taskID, err = m.workQueue.Write(ctx, &workqueue.Payload{
-		Type:          workqueue.PayloadTypeExecute,
-		TaskID:        taskID,
-		ExecuteParams: params,
+		Type:           workqueue.PayloadTypeExecute,
+		TaskID:         taskID,
+		ExecuteRequest: req,
 	})
 	if err != nil {
 		if closeErr := queue.Close(); closeErr != nil {
@@ -121,12 +123,13 @@ func (m *distributedManager) Execute(ctx context.Context, params *a2a.MessageSen
 	return newRemoteSubscription(queue, m.taskStore, taskID), nil
 }
 
-func (m *distributedManager) Cancel(ctx context.Context, params *a2a.TaskIDParams) (*a2a.Task, error) {
-	task, _, err := m.taskStore.Get(ctx, params.ID)
+func (m *distributedManager) Cancel(ctx context.Context, req *a2a.CancelTaskRequest) (*a2a.Task, error) {
+	storedTask, err := m.taskStore.Get(ctx, req.ID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load a task: %w", err)
 	}
 
+	task := storedTask.Task
 	if task.Status.State == a2a.TaskStateCanceled {
 		return task, nil
 	}
@@ -135,20 +138,20 @@ func (m *distributedManager) Cancel(ctx context.Context, params *a2a.TaskIDParam
 		return nil, fmt.Errorf("task in non-cancelable state %q: %w", task.Status.State, a2a.ErrTaskNotCancelable)
 	}
 
-	queue, err := m.queueManager.GetOrCreate(ctx, params.ID)
+	queue, err := m.queueManager.CreateReader(ctx, req.ID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get or create queue: %w", err)
 	}
 
 	if _, err := m.workQueue.Write(ctx, &workqueue.Payload{
-		Type:         workqueue.PayloadTypeCancel,
-		TaskID:       params.ID,
-		CancelParams: params,
+		Type:          workqueue.PayloadTypeCancel,
+		TaskID:        req.ID,
+		CancelRequest: req,
 	}); err != nil {
 		return nil, fmt.Errorf("failed to create work item: %w", err)
 	}
 
-	subscription := newRemoteSubscription(queue, m.taskStore, params.ID)
+	subscription := newRemoteSubscription(queue, m.taskStore, req.ID)
 	var cancelationResult a2a.SendMessageResult
 	var cancelationErr error
 	for event, err := range subscription.Events(ctx) {
@@ -163,11 +166,11 @@ func (m *distributedManager) Cancel(ctx context.Context, params *a2a.TaskIDParam
 		}
 	}
 	if cancelationResult == nil && cancelationErr != nil {
-		task, _, err := m.taskStore.Get(ctx, params.ID)
+		storedTask, err := m.taskStore.Get(ctx, req.ID)
 		if err != nil {
 			cancelationErr = err
 		} else {
-			cancelationResult = task
+			cancelationResult = storedTask.Task
 		}
 	}
 	return convertToCancelationResult(ctx, cancelationResult, cancelationErr)

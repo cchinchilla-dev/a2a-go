@@ -18,8 +18,9 @@ import (
 	"context"
 	"iter"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2asrv/taskstore"
+	"github.com/a2aproject/a2a-go/v1/internal/eventpipe"
 )
 
 // Manager provides an API for executing and canceling tasks.
@@ -27,14 +28,9 @@ type Manager interface {
 	// Resubscribe is used to resubscribe to events of an active execution.
 	Resubscribe(ctx context.Context, taskID a2a.TaskID) (Subscription, error)
 	// Execute requests an execution for handling a received message.
-	Execute(ctx context.Context, params *a2a.MessageSendParams) (Subscription, error)
+	Execute(ctx context.Context, req *a2a.SendMessageRequest) (Subscription, error)
 	// Cancel requests a task cancelation.
-	Cancel(ctx context.Context, params *a2a.TaskIDParams) (*a2a.Task, error)
-}
-
-// TaskStore is a dependency required for loading latest task snapshots.
-type TaskStore interface {
-	Get(context.Context, a2a.TaskID) (*a2a.Task, a2a.TaskVersion, error)
+	Cancel(ctx context.Context, req *a2a.CancelTaskRequest) (*a2a.Task, error)
 }
 
 // Subscription encapsulates the logic of subscribing to execution events.
@@ -49,10 +45,10 @@ type Subscription interface {
 // Factory is used to setup task execution or cancelation context.
 type Factory interface {
 	// CreateExecutor is used to create initialized Executor and Processor for a Task execution which will run in separate goroutines.
-	CreateExecutor(context.Context, a2a.TaskID, *a2a.MessageSendParams) (Executor, Processor, error)
+	CreateExecutor(context.Context, a2a.TaskID, *a2a.SendMessageRequest) (Executor, Processor, error)
 
 	// CreateCanceler is used to create initialized Canceler and Processor for a Task cancelation which will run in separate goroutines.
-	CreateCanceler(context.Context, *a2a.TaskIDParams) (Canceler, Processor, error)
+	CreateCanceler(context.Context, *a2a.CancelTaskRequest) (Canceler, Processor, error)
 }
 
 // Processor implementation handles events produced during AgentExecution.
@@ -71,7 +67,7 @@ type ProcessorResult struct {
 	// ExecutionResult becomes the result of the execution if a non-nil value is returned.
 	ExecutionResult a2a.SendMessageResult
 	// TaskVersion is the version of the task after the event was processed.
-	TaskVersion a2a.TaskVersion
+	TaskVersion taskstore.TaskVersion
 	// EventOverride can be returned by the processor to change which event gets emitted to subscribers.
 	// This is useful when we failed to process a malformed event and moved the task to failed state.
 	EventOverride a2a.Event
@@ -79,15 +75,15 @@ type ProcessorResult struct {
 
 // Executor implementation starts an agent execution.
 type Executor interface {
-	// Start starts publishing events to the queue. Called in a separate goroutine.
-	Execute(context.Context, eventqueue.Queue) error
+	// Execute starts publishing events to the queue. Called in a separate goroutine.
+	Execute(context.Context, eventpipe.Writer) error
 }
 
 // Canceler implementation sends a Task cancelation signal.
 type Canceler interface {
 	// Cancel attempts to cancel a Task.
 	// Expected to produce a Task update event with canceled state.
-	Cancel(context.Context, eventqueue.Queue) error
+	Cancel(context.Context, eventpipe.Writer) error
 }
 
 // PanicHandlerFn is a function that handles panics occurred during execution.

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package e2e
+package e2e_test
 
 import (
 	"context"
@@ -20,11 +20,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2aclient"
-	"github.com/a2aproject/a2a-go/a2aext"
-	"github.com/a2aproject/a2a-go/a2asrv"
-	"github.com/a2aproject/a2a-go/internal/testutil/testexecutor"
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2aclient"
+	"github.com/a2aproject/a2a-go/v1/a2aext"
+	"github.com/a2aproject/a2a-go/v1/a2asrv"
+	"github.com/a2aproject/a2a-go/v1/internal/testutil/testexecutor"
 )
 
 // durationsExtension if requested instructs a server to time call execution duration.
@@ -38,16 +38,16 @@ type durationKeyType struct{}
 // durationTracker implements the extension by providing an [a2asrv.CallInterceptor].
 type durationTracker struct{}
 
-func (s *durationTracker) Before(ctx context.Context, callCtx *a2asrv.CallContext, req *a2asrv.Request) (context.Context, error) {
+func (s *durationTracker) Before(ctx context.Context, callCtx *a2asrv.CallContext, req *a2asrv.Request) (context.Context, any, error) {
 	extensions, ok := a2asrv.ExtensionsFrom(ctx)
 	if !ok {
-		return ctx, nil
+		return ctx, nil, nil
 	}
 	if !extensions.Requested(&durationsExtension) {
-		return ctx, nil
+		return ctx, nil, nil
 	}
 	extensions.Activate(&durationsExtension)
-	return context.WithValue(ctx, durationKeyType{}, time.Now()), nil
+	return context.WithValue(ctx, durationKeyType{}, time.Now()), nil, nil
 }
 
 func (s *durationTracker) After(ctx context.Context, callCtx *a2asrv.CallContext, resp *a2asrv.Response) error {
@@ -98,27 +98,28 @@ func TestDurationsExtension(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			serverCard := &a2a.AgentCard{
-				PreferredTransport: a2a.TransportProtocolJSONRPC,
-				Capabilities:       a2a.AgentCapabilities{Extensions: tc.serverDeclares},
+				Capabilities: a2a.AgentCapabilities{Extensions: tc.serverDeclares},
 			}
 
-			agentExecutor := testexecutor.FromEventGenerator(func(reqCtx *a2asrv.RequestContext) []a2a.Event {
-				return []a2a.Event{a2a.NewMessage(a2a.MessageRoleAgent, reqCtx.Message.Parts...)}
+			agentExecutor := testexecutor.FromEventGenerator(func(execCtx *a2asrv.ExecutorContext) []a2a.Event {
+				return []a2a.Event{a2a.NewMessage(a2a.MessageRoleAgent, execCtx.Message.Parts...)}
 			})
-			handler := a2asrv.NewHandler(agentExecutor, a2asrv.WithCallInterceptor(&durationTracker{}))
+			handler := a2asrv.NewHandler(agentExecutor, a2asrv.WithCallInterceptors(&durationTracker{}))
 
 			server := httptest.NewServer(a2asrv.NewJSONRPCHandler(handler))
-			serverCard.URL = server.URL
+			serverCard.SupportedInterfaces = []*a2a.AgentInterface{
+				a2a.NewAgentInterface(server.URL, a2a.TransportProtocolJSONRPC),
+			}
 			defer server.Close()
 
-			client, err := a2aclient.NewFromCard(ctx, serverCard, a2aclient.WithInterceptors(
+			client, err := a2aclient.NewFromCard(ctx, serverCard, a2aclient.WithCallInterceptors(
 				a2aext.NewActivator(tc.activatorConfig...),
 			))
 			if err != nil {
 				t.Fatalf("a2aclient.NewFromCard() error = %v", err)
 			}
-			result, err := client.SendMessage(ctx, &a2a.MessageSendParams{
-				Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "ping"}),
+			result, err := client.SendMessage(ctx, &a2a.SendMessageRequest{
+				Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("ping")),
 			})
 			if err != nil {
 				t.Fatalf("SendMessage failed: %v", err)

@@ -23,11 +23,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/log"
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/log"
 )
 
-var tokenHeader = http.CanonicalHeaderKey("X-A2A-Notification-Token")
+var tokenHeader = http.CanonicalHeaderKey("A2A-Notification-Token")
 
 // HTTPPushSender sends A2A events to a push notification endpoint over HTTP.
 type HTTPPushSender struct {
@@ -76,14 +76,11 @@ func (s *HTTPPushSender) SendPush(ctx context.Context, config *a2a.PushConfig, t
 		req.Header.Set(tokenHeader, config.Token)
 	}
 	if config.Auth != nil && config.Auth.Credentials != "" {
-		// Find the first supported scheme and apply it.
-		for _, scheme := range config.Auth.Schemes {
-			switch strings.ToLower(scheme) {
-			case "bearer":
-				req.Header.Set("Authorization", "Bearer "+config.Auth.Credentials)
-			case "basic":
-				req.Header.Set("Authorization", "Basic "+config.Auth.Credentials)
-			}
+		switch strings.ToLower(config.Auth.Scheme) {
+		case "bearer":
+			req.Header.Set("Authorization", "Bearer "+config.Auth.Credentials)
+		case "basic":
+			req.Header.Set("Authorization", "Basic "+config.Auth.Credentials)
 		}
 	}
 

@@ -20,8 +20,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/log"
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/log"
 )
 
 // ErrCredentialNotFound is returned by [CredentialsService] if a credential for the provided
@@ -34,9 +34,9 @@ type SessionID string
 // Used to store a SessionID in context.Context.
 type sessionIDKey struct{}
 
-// WithSessionID allows callers to attach a session identifier to the request.
+// AttachSessionID allows callers to attach a session identifier to the request.
 // [CallInterceptor] can access this identifier using [SessionIDFrom].
-func WithSessionID(ctx context.Context, sid SessionID) context.Context {
+func AttachSessionID(ctx context.Context, sid SessionID) context.Context {
 	return context.WithValue(ctx, sessionIDKey{}, sid)
 }
 
@@ -50,7 +50,7 @@ func SessionIDFrom(ctx context.Context) (SessionID, bool) {
 type AuthCredential string
 
 // AuthInterceptor implements [CallInterceptor].
-// It uses SessionID provided using [WithSessionID] to lookup credentials
+// It uses SessionID provided using [AttachSessionID] to lookup credentials
 // and attach them according to the security scheme specified in the agent card.
 // Credentials fetching is delegated to [CredentialsService].
 type AuthInterceptor struct {
@@ -60,17 +60,21 @@ type AuthInterceptor struct {
 
 var _ CallInterceptor = (*AuthInterceptor)(nil)
 
-func (ai *AuthInterceptor) Before(ctx context.Context, req *Request) (context.Context, error) {
-	if req.Card == nil || req.Card.Security == nil || req.Card.SecuritySchemes == nil {
-		return ctx, nil
+// Before implements the CallInterceptor interface.
+// It retrieves credentials for the current session and security requirements,
+// and attaches the appropriate authorization parameters (e.g. Bearer token or API Key)
+// to the request's ServiceParams.
+func (ai *AuthInterceptor) Before(ctx context.Context, req *Request) (context.Context, any, error) {
+	if req.Card == nil || req.Card.SecurityRequirements == nil || req.Card.SecuritySchemes == nil {
+		return ctx, nil, nil
 	}
 
 	sessionID, ok := SessionIDFrom(ctx)
 	if !ok {
-		return ctx, nil
+		return ctx, nil, nil
 	}
 
-	for _, requirement := range req.Card.Security {
+	for _, requirement := range req.Card.SecurityRequirements {
 		for schemeName := range requirement {
 			credential, err := ai.Service.Get(ctx, sessionID, schemeName)
 			if errors.Is(err, ErrCredentialNotFound) {
@@ -86,20 +90,21 @@ func (ai *AuthInterceptor) Before(ctx context.Context, req *Request) (context.Co
 			}
 			switch v := scheme.(type) {
 			case a2a.HTTPAuthSecurityScheme, a2a.OAuth2SecurityScheme:
-				req.Meta["Authorization"] = []string{fmt.Sprintf("Bearer %s", credential)}
-				return ctx, nil
+				req.ServiceParams["Authorization"] = []string{fmt.Sprintf("Bearer %s", credential)}
+				return ctx, nil, nil
 			case a2a.APIKeySecurityScheme:
-				req.Meta[v.Name] = []string{string(credential)}
-				return ctx, nil
+				req.ServiceParams[v.Name] = []string{string(credential)}
+				return ctx, nil, nil
 			}
 		}
 	}
 
-	return ctx, nil
+	return ctx, nil, nil
 }
 
 // CredentialsService is used by [AuthInterceptor] for resolving credentials.
 type CredentialsService interface {
+	// Get retrieves the credential for the given session ID and security scheme name.
 	Get(ctx context.Context, sid SessionID, scheme a2a.SecuritySchemeName) (AuthCredential, error)
 }
 
@@ -121,6 +126,7 @@ func NewInMemoryCredentialsStore() *InMemoryCredentialsStore {
 	}
 }
 
+// Get retrieves the credential for the given session ID and security scheme name.
 func (s *InMemoryCredentialsStore) Get(ctx context.Context, sid SessionID, scheme a2a.SecuritySchemeName) (AuthCredential, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -138,6 +144,7 @@ func (s *InMemoryCredentialsStore) Get(ctx context.Context, sid SessionID, schem
 	return credential, nil
 }
 
+// Set stores the credential for the given session ID and security scheme name.
 func (s *InMemoryCredentialsStore) Set(sid SessionID, scheme a2a.SecuritySchemeName, credential AuthCredential) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

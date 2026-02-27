@@ -12,55 +12,62 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package testexecutor provides mock implementations for agent executor for testing.
 package testexecutor
 
 import (
 	"context"
+	"iter"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2asrv"
-	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2asrv"
 )
 
+// TestAgentExecutor is a mock of [a2asrv.AgentExecutor].
 type TestAgentExecutor struct {
 	Emitted   []a2a.Event
-	ExecuteFn func(context.Context, *a2asrv.RequestContext, eventqueue.Queue) error
-	CancelFn  func(context.Context, *a2asrv.RequestContext, eventqueue.Queue) error
+	ExecuteFn func(context.Context, *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error]
+	CancelFn  func(context.Context, *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error]
 }
 
 var _ a2asrv.AgentExecutor = (*TestAgentExecutor)(nil)
 
-func FromFunction(fn func(context.Context, *a2asrv.RequestContext, eventqueue.Queue) error) *TestAgentExecutor {
+// FromFunction creates a [TestAgentExecutor] from a function.
+func FromFunction(fn func(context.Context, *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error]) *TestAgentExecutor {
 	return &TestAgentExecutor{ExecuteFn: fn}
 }
 
-func FromEventGenerator(generator func(reqCtx *a2asrv.RequestContext) []a2a.Event) *TestAgentExecutor {
+// FromEventGenerator creates a [TestAgentExecutor] that emits events from a generator.
+func FromEventGenerator(generator func(execCtx *a2asrv.ExecutorContext) []a2a.Event) *TestAgentExecutor {
 	var exec *TestAgentExecutor
 	exec = &TestAgentExecutor{
 		Emitted: []a2a.Event{},
-		ExecuteFn: func(ctx context.Context, reqCtx *a2asrv.RequestContext, q eventqueue.Queue) error {
-			for _, ev := range generator(reqCtx) {
-				if err := q.Write(ctx, ev); err != nil {
-					return err
+		ExecuteFn: func(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+			return func(yield func(a2a.Event, error) bool) {
+				for _, ev := range generator(execCtx) {
+					if !yield(ev, nil) {
+						return
+					}
+					exec.Emitted = append(exec.Emitted, ev)
 				}
-				exec.Emitted = append(exec.Emitted, ev)
 			}
-			return nil
 		},
 	}
 	return exec
 }
 
-func (e *TestAgentExecutor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, q eventqueue.Queue) error {
+// Execute implements [a2asrv.AgentExecutor] interface.
+func (e *TestAgentExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	if e.ExecuteFn != nil {
-		return e.ExecuteFn(ctx, reqCtx, q)
+		return e.ExecuteFn(ctx, execCtx)
 	}
-	return nil
+	return func(yield func(a2a.Event, error) bool) {}
 }
 
-func (e *TestAgentExecutor) Cancel(ctx context.Context, reqCtx *a2asrv.RequestContext, q eventqueue.Queue) error {
+// Cancel implements [a2asrv.AgentExecutor] interface.
+func (e *TestAgentExecutor) Cancel(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	if e.CancelFn != nil {
-		return e.CancelFn(ctx, reqCtx, q)
+		return e.CancelFn(ctx, execCtx)
 	}
-	return nil
+	return func(yield func(a2a.Event, error) bool) {}
 }

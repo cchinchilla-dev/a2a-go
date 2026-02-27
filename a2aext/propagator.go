@@ -19,9 +19,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2aclient"
-	"github.com/a2aproject/a2a-go/a2asrv"
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2aclient"
+	"github.com/a2aproject/a2a-go/v1/a2asrv"
 )
 
 // propagatorCtxKeyType is the context key used to pass values which need to be propagated.
@@ -80,7 +80,7 @@ func GetMetadata(ctx context.Context) map[string]any {
 }
 
 // NewClientPropagator returns a client interceptor that propagates payload metada header values.
-// The client interceptor needs to be set on a2aclient or client factory using [a2aclient.WithInterceptors] option.
+// The client interceptor needs to be set on a2aclient or client factory using [a2aclient.WithCallInterceptors] option.
 func NewClientPropagator(config *ClientPropagatorConfig) a2aclient.CallInterceptor {
 	var cfg ClientPropagatorConfig
 	if config != nil {
@@ -102,7 +102,7 @@ func NewClientPropagator(config *ClientPropagatorConfig) a2aclient.CallIntercept
 	if cfg.HeaderPredicate == nil {
 		// Propagate requested extensions.
 		cfg.HeaderPredicate = func(ctx context.Context, card *a2a.AgentCard, key string, val string) bool {
-			if !strings.EqualFold(key, CallMetaKey) {
+			if !strings.EqualFold(key, a2a.SvcParamExtensions) {
 				return false
 			}
 			return isExtensionSupported(card, val)
@@ -112,7 +112,7 @@ func NewClientPropagator(config *ClientPropagatorConfig) a2aclient.CallIntercept
 }
 
 // NewServerPropagator returns a server interceptor that propagates payload metada header values.
-// The server interceptor needs to be set on request handler using [a2asrv.WithCallInterceptor] option.
+// The server interceptor needs to be set on request handler using [a2asrv.WithCallInterceptors] option.
 func NewServerPropagator(config *ServerPropagatorConfig) a2asrv.CallInterceptor {
 	var cfg ServerPropagatorConfig
 	if config != nil {
@@ -130,7 +130,7 @@ func NewServerPropagator(config *ServerPropagatorConfig) a2asrv.CallInterceptor 
 	if cfg.HeaderPredicate == nil {
 		// Propagate requested extensions.
 		cfg.HeaderPredicate = func(ctx context.Context, key string) bool {
-			return strings.EqualFold(key, CallMetaKey)
+			return strings.EqualFold(key, a2a.SvcParamExtensions)
 		}
 	}
 	return &serverPropagator{ServerPropagatorConfig: cfg}
@@ -142,9 +142,10 @@ type serverPropagator struct {
 	ServerPropagatorConfig
 }
 
-// Before extracts valid keys from the incoming request and attaches them to the context
+// Before implements [a2asrv.CallInterceptor].
+// It extracts valid keys from the incoming request and attaches them to the context
 // so the client interceptor can find them later.
-func (s *serverPropagator) Before(ctx context.Context, callCtx *a2asrv.CallContext, req *a2asrv.Request) (context.Context, error) {
+func (s *serverPropagator) Before(ctx context.Context, callCtx *a2asrv.CallContext, req *a2asrv.Request) (context.Context, any, error) {
 	propagatorCtx := &propagatorContext{
 		metadata:       make(map[string]any),
 		requestHeaders: make(map[string][]string),
@@ -159,13 +160,13 @@ func (s *serverPropagator) Before(ctx context.Context, callCtx *a2asrv.CallConte
 		}
 	}
 
-	for headerName, headerValues := range callCtx.RequestMeta().List() {
+	for headerName, headerValues := range callCtx.ServiceParams().List() {
 		if s.HeaderPredicate(ctx, headerName) {
 			propagatorCtx.requestHeaders[headerName] = headerValues
 		}
 	}
 
-	return context.WithValue(ctx, propagatorCtxKeyType{}, propagatorCtx), nil
+	return context.WithValue(ctx, propagatorCtxKeyType{}, propagatorCtx), nil, nil
 }
 
 // clientPropagator implements [a2aclient.CallInterceptor].
@@ -174,11 +175,12 @@ type clientPropagator struct {
 	ClientPropagatorConfig
 }
 
-// Before checks the context for propagated values and injects them into the outgoing request.
-func (c *clientPropagator) Before(ctx context.Context, req *a2aclient.Request) (context.Context, error) {
+// Before implements [a2aclient.CallInterceptor].
+// It checks the context for propagated values and injects them into the outgoing request.
+func (c *clientPropagator) Before(ctx context.Context, req *a2aclient.Request) (context.Context, any, error) {
 	toPropagate, ok := ctx.Value(propagatorCtxKeyType{}).(*propagatorContext)
 	if !ok {
-		return ctx, nil
+		return ctx, nil, nil
 	}
 
 	if len(toPropagate.metadata) > 0 {
@@ -196,9 +198,9 @@ func (c *clientPropagator) Before(ctx context.Context, req *a2aclient.Request) (
 			if !c.HeaderPredicate(ctx, req.Card, headerName, headerValue) {
 				continue
 			}
-			req.Meta.Append(headerName, headerValue)
+			req.ServiceParams.Append(headerName, headerValue)
 		}
 	}
 
-	return ctx, nil
+	return ctx, nil, nil
 }

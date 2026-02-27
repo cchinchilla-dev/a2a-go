@@ -19,8 +19,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2asrv/limiter"
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2asrv/limiter"
 )
 
 func TestManager_ExecuteRateLimit(t *testing.T) {
@@ -131,7 +131,7 @@ func TestManager_ExecuteRateLimit(t *testing.T) {
 			manager := NewLocalManager(LocalManagerConfig{
 				ConcurrencyConfig: tc.config,
 				Factory: &testFactory{
-					CreateExecutorFn: func(context.Context, a2a.TaskID, *a2a.MessageSendParams) (Executor, Processor, error) {
+					CreateExecutorFn: func(context.Context, a2a.TaskID, *a2a.SendMessageRequest) (Executor, Processor, error) {
 						executor := <-nextExecutorChan
 						return executor, executor, nil
 					},
@@ -164,7 +164,7 @@ func TestManager_ExecuteRateLimit(t *testing.T) {
 					finished: make(chan struct{}),
 				}
 				go func() {
-					scopedCtx := limiter.WithScope(ctx, ev.scope)
+					scopedCtx := limiter.AttachScope(ctx, ev.scope)
 
 					executor := newExecutor()
 					executor.nextEventTerminal = true
@@ -173,7 +173,7 @@ func TestManager_ExecuteRateLimit(t *testing.T) {
 					}
 
 					tid := a2a.TaskID(fmt.Sprintf("task-%d", i))
-					subscription, err := manager.Execute(scopedCtx, &a2a.MessageSendParams{})
+					subscription, err := manager.Execute(scopedCtx, &a2a.SendMessageRequest{})
 					if err != nil {
 						exec.err <- err
 						return

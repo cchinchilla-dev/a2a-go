@@ -18,16 +18,17 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
-	"github.com/a2aproject/a2a-go/a2asrv/workqueue"
-	"github.com/a2aproject/a2a-go/internal/eventpipe"
-	"github.com/a2aproject/a2a-go/log"
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2asrv/eventqueue"
+	"github.com/a2aproject/a2a-go/v1/a2asrv/taskstore"
+	"github.com/a2aproject/a2a-go/v1/a2asrv/workqueue"
+	"github.com/a2aproject/a2a-go/v1/internal/eventpipe"
+	"github.com/a2aproject/a2a-go/v1/log"
 )
 
 type workQueueHandler struct {
 	queueManager eventqueue.Manager
-	taskStore    TaskStore
+	taskStore    taskstore.Store
 	factory      Factory
 	panicHandler PanicHandlerFn
 }
@@ -39,7 +40,9 @@ func newWorkQueueHandler(cfg *DistributedManagerConfig) *workQueueHandler {
 		factory:      cfg.Factory,
 		panicHandler: cfg.PanicHandler,
 	}
-	cfg.WorkQueue.RegisterHandler(cfg.ConcurrencyConfig, backend.handle)
+	cfg.WorkQueue.RegisterHandler(workqueue.HandlerConfig{
+		Limiter: cfg.ConcurrencyConfig,
+	}, backend.handle)
 	return backend
 }
 
@@ -52,10 +55,10 @@ func (b *workQueueHandler) handle(ctx context.Context, payload *workqueue.Payloa
 
 	switch payload.Type {
 	case workqueue.PayloadTypeExecute:
-		if payload.ExecuteParams == nil {
-			return nil, fmt.Errorf("execution params not set: %w", workqueue.ErrMalformedPayload)
+		if payload.ExecuteRequest == nil {
+			return nil, fmt.Errorf("execution request not set: %w", workqueue.ErrMalformedPayload)
 		}
-		executor, processor, err := b.factory.CreateExecutor(ctx, payload.TaskID, payload.ExecuteParams)
+		executor, processor, err := b.factory.CreateExecutor(ctx, payload.TaskID, payload.ExecuteRequest)
 		if err != nil {
 			return nil, fmt.Errorf("setup failed: %w", err)
 		}
@@ -63,10 +66,10 @@ func (b *workQueueHandler) handle(ctx context.Context, payload *workqueue.Payloa
 		eventProcessor = processor
 
 	case workqueue.PayloadTypeCancel:
-		if payload.CancelParams == nil {
-			return nil, fmt.Errorf("cancelation params not set: %w", workqueue.ErrMalformedPayload)
+		if payload.CancelRequest == nil {
+			return nil, fmt.Errorf("cancelation request not set: %w", workqueue.ErrMalformedPayload)
 		}
-		canceler, processor, err := b.factory.CreateCanceler(ctx, payload.CancelParams)
+		canceler, processor, err := b.factory.CreateCanceler(ctx, payload.CancelRequest)
 		if err != nil {
 			return nil, fmt.Errorf("setup failed: %w", err)
 		}
@@ -78,7 +81,7 @@ func (b *workQueueHandler) handle(ctx context.Context, payload *workqueue.Payloa
 		return nil, fmt.Errorf("unknown payload type: %q", payload.Type)
 	}
 
-	queue, err := b.queueManager.GetOrCreate(ctx, payload.TaskID)
+	queue, err := b.queueManager.CreateWriter(ctx, payload.TaskID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create a queue: %w", err)
 	}

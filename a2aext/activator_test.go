@@ -16,15 +16,15 @@ package a2aext
 
 import (
 	"context"
+	"iter"
 	"maps"
 	"net/http/httptest"
 	"testing"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2aclient"
-	"github.com/a2aproject/a2a-go/a2asrv"
-	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
-	"github.com/a2aproject/a2a-go/internal/testutil/testexecutor"
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2aclient"
+	"github.com/a2aproject/a2a-go/v1/a2asrv"
+	"github.com/a2aproject/a2a-go/v1/internal/testutil/testexecutor"
 	"github.com/google/go-cmp/cmp"
 )
 
@@ -79,13 +79,13 @@ func TestActivator(t *testing.T) {
 
 			gotHeaders := map[string][]string{}
 			captureExecutor := testexecutor.FromFunction(
-				func(ctx context.Context, rc *a2asrv.RequestContext, q eventqueue.Queue) error {
-					if callCtx, ok := a2asrv.CallContextFrom(ctx); ok {
-						maps.Insert(gotHeaders, callCtx.RequestMeta().List())
+				func(ctx context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+					return func(yield func(a2a.Event, error) bool) {
+						maps.Insert(gotHeaders, ec.ServiceParams.List())
+						event := a2a.NewSubmittedTask(ec, ec.Message)
+						event.Status = a2a.TaskStatus{State: a2a.TaskStateCompleted}
+						yield(event, nil)
 					}
-					event := a2a.NewStatusUpdateEvent(rc, a2a.TaskStateCompleted, nil)
-					event.Final = true
-					return q.Write(ctx, event)
 				},
 			)
 
@@ -94,24 +94,21 @@ func TestActivator(t *testing.T) {
 			client, err := a2aclient.NewFromCard(
 				ctx,
 				agentCard,
-				a2aclient.WithInterceptors(activator),
+				a2aclient.WithCallInterceptors(activator),
 			)
 			if err != nil {
 				t.Fatalf("a2aclient.NewFromEndpoints() error = %v", err)
 			}
 
-			_, err = client.SendMessage(ctx, &a2a.MessageSendParams{
-				Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "verify extensions"}),
+			_, err = client.SendMessage(ctx, &a2a.SendMessageRequest{
+				Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("verify extensions")),
 			})
 			if err != nil {
 				t.Fatalf("client.SendMessage() error = %v", err)
 			}
 
-			var gotExtensions []string
-			if vals, ok := gotHeaders[CallMetaKey]; ok {
-				gotExtensions = vals
-			}
-			if diff := cmp.Diff(tc.clientSends, gotExtensions); diff != "" {
+			gotExtensions, _ := a2asrv.NewServiceParams(gotHeaders).Get(a2a.SvcParamExtensions)
+			if diff := cmp.Diff(tc.clientSends, gotExtensions, cmpIgnoreHeaderCase()); diff != "" {
 				t.Errorf("wrong extension headers (+got,-want), diff = %s", diff)
 			}
 		})
@@ -123,15 +120,16 @@ func startServerWithExtensions(t *testing.T, executor a2asrv.AgentExecutor, exte
 	for _, uri := range extensionURIs {
 		extensions = append(extensions, a2a.AgentExtension{URI: uri})
 	}
-	card := &a2a.AgentCard{
-		Capabilities: a2a.AgentCapabilities{
-			Extensions: extensions,
-		},
-	}
+
 	reqHandler := a2asrv.NewHandler(executor)
 	server := httptest.NewServer(a2asrv.NewJSONRPCHandler(reqHandler))
-	card.URL = server.URL
-	card.PreferredTransport = a2a.TransportProtocolJSONRPC
 	t.Cleanup(server.Close)
+
+	card := &a2a.AgentCard{
+		Capabilities: a2a.AgentCapabilities{Extensions: extensions},
+		SupportedInterfaces: []*a2a.AgentInterface{
+			a2a.NewAgentInterface(server.URL, a2a.TransportProtocolJSONRPC),
+		},
+	}
 	return card
 }

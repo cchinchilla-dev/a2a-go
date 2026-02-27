@@ -18,8 +18,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/log"
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/log"
 )
 
 type promise struct {
@@ -48,12 +48,12 @@ func (p *promise) signalDone() {
 	close(p.done)
 }
 
-func (r *promise) wait(ctx context.Context) (a2a.SendMessageResult, error) {
+func (p *promise) wait(ctx context.Context) (a2a.SendMessageResult, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	case <-r.done:
-		return r.value, r.err
+	case <-p.done:
+		return p.value, p.err
 	}
 }
 

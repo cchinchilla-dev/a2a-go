@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package e2e
+package e2e_test
 
 import (
 	"context"
@@ -22,27 +22,26 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2aclient"
-	"github.com/a2aproject/a2a-go/a2aclient/agentcard"
-	"github.com/a2aproject/a2a-go/a2asrv"
-	"github.com/a2aproject/a2a-go/internal/testutil/testexecutor"
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2aclient"
+	"github.com/a2aproject/a2a-go/v1/a2aclient/agentcard"
+	"github.com/a2aproject/a2a-go/v1/a2asrv"
+	"github.com/a2aproject/a2a-go/v1/internal/testutil/testexecutor"
 	"github.com/google/go-cmp/cmp"
 )
 
 func TestJSONRPC_Streaming(t *testing.T) {
 	ctx := t.Context()
 
-	executor := testexecutor.FromEventGenerator(func(reqCtx *a2asrv.RequestContext) []a2a.Event {
-		task := &a2a.Task{ID: reqCtx.TaskID, ContextID: reqCtx.ContextID}
-		artifact := a2a.NewArtifactEvent(task, a2a.TextPart{Text: "Hello"})
-		finalUpdate := a2a.NewStatusUpdateEvent(task, a2a.TaskStateCompleted, a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "Done!"}))
-		finalUpdate.Final = true
+	executor := testexecutor.FromEventGenerator(func(execCtx *a2asrv.ExecutorContext) []a2a.Event {
+		task := &a2a.Task{ID: execCtx.TaskID, ContextID: execCtx.ContextID}
+		artifact := a2a.NewArtifactEvent(task, a2a.NewTextPart("Hello"))
+		finalUpdate := a2a.NewStatusUpdateEvent(task, a2a.TaskStateCompleted, a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("Done!")))
 		return []a2a.Event{
-			a2a.NewStatusUpdateEvent(task, a2a.TaskStateSubmitted, nil),
+			a2a.NewSubmittedTask(execCtx, execCtx.Message),
 			a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
 			artifact,
-			a2a.NewArtifactUpdateEvent(task, artifact.Artifact.ID, a2a.TextPart{Text: ", world!"}),
+			a2a.NewArtifactUpdateEvent(task, artifact.Artifact.ID, a2a.NewTextPart(", world!")),
 			finalUpdate,
 		}
 	})
@@ -64,7 +63,7 @@ func TestJSONRPC_Streaming(t *testing.T) {
 	client := mustCreateClient(t, card)
 
 	var received []a2a.Event
-	msg := &a2a.MessageSendParams{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "Work"})}
+	msg := &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("Work"))}
 	for event, err := range client.SendStreamingMessage(ctx, msg) {
 		if err != nil {
 			t.Fatalf("client.SendStreamingMessage() error = %v", err)
@@ -81,7 +80,7 @@ func TestJSONRPC_ExecutionScopeStreamingPanic(t *testing.T) {
 	ctx := t.Context()
 
 	reqHandler := a2asrv.NewHandler(
-		testexecutor.FromEventGenerator(func(reqCtx *a2asrv.RequestContext) []a2a.Event {
+		testexecutor.FromEventGenerator(func(execCtx *a2asrv.ExecutorContext) []a2a.Event {
 			panic("oh no")
 		}),
 		a2asrv.WithExecutionPanicHandler(func(r any) error {
@@ -93,7 +92,7 @@ func TestJSONRPC_ExecutionScopeStreamingPanic(t *testing.T) {
 	client := mustCreateClient(t, newAgentCard(server.URL))
 
 	var gotErr error
-	msg := &a2a.MessageSendParams{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "Work"})}
+	msg := &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("Work"))}
 	for _, err := range client.SendStreamingMessage(ctx, msg) {
 		gotErr = err
 	}
@@ -107,20 +106,23 @@ func TestJSONRPC_RequestScopeStreamingPanic(t *testing.T) {
 
 	reqHandler := a2asrv.NewHandler(
 		&testexecutor.TestAgentExecutor{},
-		a2asrv.WithCallInterceptor(&fnInterceptor{
-			beforeFn: func(ctx context.Context, callCtx *a2asrv.CallContext, req *a2asrv.Request) (context.Context, error) {
+		a2asrv.WithCallInterceptors(&fnInterceptor{
+			beforeFn: func(ctx context.Context, callCtx *a2asrv.CallContext, req *a2asrv.Request) (context.Context, any, error) {
 				panic("oh no")
 			},
 		}),
 	)
 
-	server := httptest.NewServer(a2asrv.NewJSONRPCHandler(reqHandler, a2asrv.WithPanicHandler(func(r any) error {
-		return a2a.ErrInternalError
-	})))
+	server := httptest.NewServer(a2asrv.NewJSONRPCHandler(
+		reqHandler,
+		a2asrv.WithTransportPanicHandler(func(r any) error {
+			return a2a.ErrInternalError
+		}),
+	))
 	client := mustCreateClient(t, newAgentCard(server.URL))
 
 	var gotErr error
-	msg := &a2a.MessageSendParams{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "Work"})}
+	msg := &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("Work"))}
 	for _, err := range client.SendStreamingMessage(ctx, msg) {
 		gotErr = err
 	}
@@ -140,21 +142,22 @@ func mustCreateClient(t *testing.T, card *a2a.AgentCard) *a2aclient.Client {
 
 func newAgentCard(url string) *a2a.AgentCard {
 	return &a2a.AgentCard{
-		URL:                url,
-		PreferredTransport: a2a.TransportProtocolJSONRPC,
-		Capabilities:       a2a.AgentCapabilities{Streaming: true},
+		SupportedInterfaces: []*a2a.AgentInterface{
+			a2a.NewAgentInterface(url, a2a.TransportProtocolJSONRPC),
+		},
+		Capabilities: a2a.AgentCapabilities{Streaming: true},
 	}
 }
 
 // TODO: replace with public utility
 type fnInterceptor struct {
 	a2asrv.PassthroughCallInterceptor
-	beforeFn func(ctx context.Context, callCtx *a2asrv.CallContext, req *a2asrv.Request) (context.Context, error)
+	beforeFn func(ctx context.Context, callCtx *a2asrv.CallContext, req *a2asrv.Request) (context.Context, any, error)
 }
 
-func (ci *fnInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallContext, req *a2asrv.Request) (context.Context, error) {
+func (ci *fnInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallContext, req *a2asrv.Request) (context.Context, any, error) {
 	if ci.beforeFn != nil {
 		return ci.beforeFn(ctx, callCtx, req)
 	}
-	return ctx, nil
+	return ctx, nil, nil
 }

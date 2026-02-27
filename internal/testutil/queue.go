@@ -17,44 +17,42 @@ package testutil
 import (
 	"context"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
-	"github.com/a2aproject/a2a-go/internal/eventpipe"
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2asrv/eventqueue"
+	"github.com/a2aproject/a2a-go/v1/a2asrv/taskstore"
+	"github.com/a2aproject/a2a-go/v1/internal/eventpipe"
 )
 
 // TestEventQueue is a mock of eventqueue.Queue
 type TestEventQueue struct {
 	pipe *eventpipe.Local
 
-	ReadFunc  func(ctx context.Context) (a2a.Event, a2a.TaskVersion, error)
-	WriteFunc func(ctx context.Context, event a2a.Event, version a2a.TaskVersion) error
+	ReadFunc  func(ctx context.Context) (*eventqueue.Message, error)
+	WriteFunc func(ctx context.Context, msg *eventqueue.Message) error
 	CloseFunc func() error
 }
 
-var _ eventqueue.Queue = (*TestEventQueue)(nil)
+var _ eventqueue.Reader = (*TestEventQueue)(nil)
+var _ eventqueue.Writer = (*TestEventQueue)(nil)
 
-func (m *TestEventQueue) Read(ctx context.Context) (a2a.Event, a2a.TaskVersion, error) {
+// Read implements [eventqueue.Reader] interface.
+func (m *TestEventQueue) Read(ctx context.Context) (*eventqueue.Message, error) {
 	if m.ReadFunc != nil {
 		return m.ReadFunc(ctx)
 	}
 	event, err := m.pipe.Reader.Read(ctx)
-	return event, a2a.TaskVersionMissing, err
+	return &eventqueue.Message{Event: event, TaskVersion: taskstore.TaskVersionMissing}, err
 }
 
-func (m *TestEventQueue) Write(ctx context.Context, event a2a.Event) error {
+// Write implements [eventqueue.Writer] interface.
+func (m *TestEventQueue) Write(ctx context.Context, msg *eventqueue.Message) error {
 	if m.WriteFunc != nil {
-		return m.WriteFunc(ctx, event, a2a.TaskVersionMissing)
+		return m.WriteFunc(ctx, msg)
 	}
-	return m.pipe.Writer.Write(ctx, event)
+	return m.pipe.Writer.Write(ctx, msg.Event)
 }
 
-func (m *TestEventQueue) WriteVersioned(ctx context.Context, event a2a.Event, version a2a.TaskVersion) error {
-	if m.WriteFunc != nil {
-		return m.WriteFunc(ctx, event, version)
-	}
-	return m.pipe.Writer.Write(ctx, event)
-}
-
+// Close implements [eventqueue.Reader] and [eventqueue.Writer] interfaces.
 func (m *TestEventQueue) Close() error {
 	if m.CloseFunc != nil {
 		return m.CloseFunc()
@@ -65,23 +63,23 @@ func (m *TestEventQueue) Close() error {
 
 // SetReadOverride overrides Read execution
 func (m *TestEventQueue) SetReadOverride(event a2a.Event, err error) *TestEventQueue {
-	m.ReadFunc = func(ctx context.Context) (a2a.Event, a2a.TaskVersion, error) {
-		return event, a2a.TaskVersionMissing, err
+	m.ReadFunc = func(ctx context.Context) (*eventqueue.Message, error) {
+		return &eventqueue.Message{Event: event, TaskVersion: taskstore.TaskVersionMissing}, err
 	}
 	return m
 }
 
-// SetReadOverride overrides Read execution with an option to provide a version.
-func (m *TestEventQueue) SetReadVersionedOverride(event a2a.Event, version a2a.TaskVersion, err error) *TestEventQueue {
-	m.ReadFunc = func(ctx context.Context) (a2a.Event, a2a.TaskVersion, error) {
-		return event, version, err
+// SetReadVersionedOverride overrides Read execution with an option to provide a version.
+func (m *TestEventQueue) SetReadVersionedOverride(event a2a.Event, version taskstore.TaskVersion, err error) *TestEventQueue {
+	m.ReadFunc = func(ctx context.Context) (*eventqueue.Message, error) {
+		return &eventqueue.Message{Event: event, TaskVersion: version}, err
 	}
 	return m
 }
 
 // SetWriteError overrides Write execution with given error
 func (m *TestEventQueue) SetWriteError(err error) *TestEventQueue {
-	m.WriteFunc = func(ctx context.Context, event a2a.Event, version a2a.TaskVersion) error {
+	m.WriteFunc = func(ctx context.Context, msg *eventqueue.Message) error {
 		return err
 	}
 	return m

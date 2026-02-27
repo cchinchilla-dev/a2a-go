@@ -21,17 +21,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"iter"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2aclient"
-	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
-	"github.com/a2aproject/a2a-go/internal/jsonrpc"
-	"github.com/a2aproject/a2a-go/internal/sse"
-	"github.com/a2aproject/a2a-go/internal/testutil"
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2aclient"
+	"github.com/a2aproject/a2a-go/v1/a2asrv/taskstore"
+	"github.com/a2aproject/a2a-go/v1/internal/jsonrpc"
+	"github.com/a2aproject/a2a-go/v1/internal/sse"
+	"github.com/a2aproject/a2a-go/v1/internal/testutil"
 	"github.com/google/go-cmp/cmp"
 )
 
@@ -41,63 +42,69 @@ func TestJSONRPC_RequestRouting(t *testing.T) {
 		call   func(ctx context.Context, client *a2aclient.Client) (any, error)
 	}{
 		{
-			method: "OnGetTask",
+			method: "GetTask",
 			call: func(ctx context.Context, client *a2aclient.Client) (any, error) {
-				return client.GetTask(ctx, &a2a.TaskQueryParams{})
+				return client.GetTask(ctx, &a2a.GetTaskRequest{})
 			},
 		},
 		{
-			method: "OnCancelTask",
+			method: "ListTasks",
 			call: func(ctx context.Context, client *a2aclient.Client) (any, error) {
-				return client.CancelTask(ctx, &a2a.TaskIDParams{})
+				return client.ListTasks(ctx, &a2a.ListTasksRequest{})
 			},
 		},
 		{
-			method: "OnSendMessage",
+			method: "CancelTask",
 			call: func(ctx context.Context, client *a2aclient.Client) (any, error) {
-				return client.SendMessage(ctx, &a2a.MessageSendParams{})
+				return client.CancelTask(ctx, &a2a.CancelTaskRequest{})
 			},
 		},
 		{
-			method: "OnSendMessageStream",
+			method: "SendMessage",
 			call: func(ctx context.Context, client *a2aclient.Client) (any, error) {
-				return handleSingleItemSeq(client.SendStreamingMessage(ctx, &a2a.MessageSendParams{}))
+				return client.SendMessage(ctx, &a2a.SendMessageRequest{})
 			},
 		},
 		{
-			method: "OnResubscribeToTask",
+			method: "SendStreamingMessage",
 			call: func(ctx context.Context, client *a2aclient.Client) (any, error) {
-				return handleSingleItemSeq(client.ResubscribeToTask(ctx, &a2a.TaskIDParams{}))
+				return handleSingleItemSeq(client.SendStreamingMessage(ctx, &a2a.SendMessageRequest{}))
 			},
 		},
 		{
-			method: "OnListTaskPushConfig",
+			method: "SubscribeToTask",
 			call: func(ctx context.Context, client *a2aclient.Client) (any, error) {
-				return client.ListTaskPushConfig(ctx, &a2a.ListTaskPushConfigParams{})
+				return handleSingleItemSeq(client.SubscribeToTask(ctx, &a2a.SubscribeToTaskRequest{}))
 			},
 		},
 		{
-			method: "OnSetTaskPushConfig",
+			method: "ListTaskPushConfigs",
 			call: func(ctx context.Context, client *a2aclient.Client) (any, error) {
-				return client.SetTaskPushConfig(ctx, &a2a.TaskPushConfig{})
+				return client.ListTaskPushConfigs(ctx, &a2a.ListTaskPushConfigRequest{})
 			},
 		},
 		{
-			method: "OnGetTaskPushConfig",
+			method: "CreateTaskPushConfig",
 			call: func(ctx context.Context, client *a2aclient.Client) (any, error) {
-				return client.GetTaskPushConfig(ctx, &a2a.GetTaskPushConfigParams{})
+				return client.CreateTaskPushConfig(ctx, &a2a.CreateTaskPushConfigRequest{})
 			},
 		},
 		{
-			method: "OnDeleteTaskPushConfig",
+			method: "GetTaskPushConfig",
 			call: func(ctx context.Context, client *a2aclient.Client) (any, error) {
-				return nil, client.DeleteTaskPushConfig(ctx, &a2a.DeleteTaskPushConfigParams{})
+				return client.GetTaskPushConfig(ctx, &a2a.GetTaskPushConfigRequest{})
 			},
 		},
 		{
-			method: "OnGetExtendedAgentCard",
+			method: "DeleteTaskPushConfig",
 			call: func(ctx context.Context, client *a2aclient.Client) (any, error) {
-				return client.GetAgentCard(ctx)
+				return nil, client.DeleteTaskPushConfig(ctx, &a2a.DeleteTaskPushConfigRequest{})
+			},
+		},
+		{
+			method: "GetExtendedAgentCard",
+			call: func(ctx context.Context, client *a2aclient.Client) (any, error) {
+				return client.GetExtendedAgentCard(ctx, &a2a.GetExtendedAgentCardRequest{})
 			},
 		},
 	}
@@ -105,20 +112,20 @@ func TestJSONRPC_RequestRouting(t *testing.T) {
 	ctx := t.Context()
 	lastCalledMethod := make(chan string, 1)
 	interceptor := &mockInterceptor{
-		beforeFn: func(ctx context.Context, callCtx *CallContext, req *Request) (context.Context, error) {
+		beforeFn: func(ctx context.Context, callCtx *CallContext, req *Request) (context.Context, any, error) {
 			lastCalledMethod <- callCtx.Method()
-			return ctx, nil
+			return ctx, nil, nil
 		},
 	}
 	reqHandler := NewHandler(
 		&mockAgentExecutor{},
-		WithCallInterceptor(interceptor),
+		WithCallInterceptors(interceptor),
 		WithExtendedAgentCard(&a2a.AgentCard{}),
 	)
 	server := httptest.NewServer(NewJSONRPCHandler(reqHandler))
 
-	client, err := a2aclient.NewFromEndpoints(ctx, []a2a.AgentInterface{
-		{URL: server.URL, Transport: a2a.TransportProtocolJSONRPC},
+	client, err := a2aclient.NewFromEndpoints(ctx, []*a2a.AgentInterface{
+		a2a.NewAgentInterface(server.URL, a2a.TransportProtocolJSONRPC),
 	})
 	if err != nil {
 		t.Fatalf("a2aclient.NewFromEndpoints() error = %v", err)
@@ -127,9 +134,13 @@ func TestJSONRPC_RequestRouting(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.method, func(t *testing.T) {
 			_, _ = tc.call(ctx, client)
-			calledMethod := <-lastCalledMethod
-			if calledMethod != tc.method {
-				t.Fatalf("wrong method called: got %q, want %q", calledMethod, tc.method)
+			select {
+			case calledMethod := <-lastCalledMethod:
+				if calledMethod != tc.method {
+					t.Fatalf("wrong method called: got %q, want %q", calledMethod, tc.method)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("method %q not called", tc.method)
 			}
 		})
 	}
@@ -140,6 +151,9 @@ func TestJSONRPC_Validations(t *testing.T) {
 	query := json.RawMessage(fmt.Sprintf(`{"id": %q}`, taskID))
 	task := &a2a.Task{ID: taskID}
 	want := mustUnmarshal(t, mustMarshal(t, task))
+	listResponse := &a2a.ListTasksResponse{Tasks: []*a2a.Task{task}, TotalSize: 1, PageSize: 3}
+	listTasksWant := mustUnmarshal(t, mustMarshal(t, listResponse))
+	auth := func(ctx context.Context) (string, error) { return "TestUser", nil }
 
 	testCases := []struct {
 		name    string
@@ -151,78 +165,92 @@ func TestJSONRPC_Validations(t *testing.T) {
 		{
 			name:    "success",
 			method:  "POST",
-			request: mustMarshal(t, jsonrpcRequest{JSONRPC: "2.0", Method: jsonrpc.MethodTasksGet, Params: query, ID: "123"}),
+			request: mustMarshal(t, jsonrpc.ServerRequest{JSONRPC: "2.0", Method: jsonrpc.MethodTasksGet, Params: query, ID: "123"}),
 			want:    want,
 		},
 		{
 			name:    "success with number ID",
 			method:  "POST",
-			request: mustMarshal(t, jsonrpcRequest{JSONRPC: "2.0", Method: jsonrpc.MethodTasksGet, Params: query, ID: 123}),
+			request: mustMarshal(t, jsonrpc.ServerRequest{JSONRPC: "2.0", Method: jsonrpc.MethodTasksGet, Params: query, ID: 123}),
 			want:    want,
 		},
 		{
 			name:    "success with nil ID",
 			method:  "POST",
-			request: mustMarshal(t, jsonrpcRequest{JSONRPC: "2.0", Method: jsonrpc.MethodTasksGet, Params: query, ID: nil}),
+			request: mustMarshal(t, jsonrpc.ServerRequest{JSONRPC: "2.0", Method: jsonrpc.MethodTasksGet, Params: query, ID: nil}),
 			want:    want,
+		},
+		{
+			name:    "success tasks/list",
+			method:  "POST",
+			request: mustMarshal(t, jsonrpc.ServerRequest{JSONRPC: "2.0", Method: jsonrpc.MethodTasksList, Params: json.RawMessage(`{"pageSize": 3}`), ID: "123"}),
+			want:    listTasksWant,
+		},
+		{
+			name:    "tasks/list with invalid page size",
+			method:  "POST",
+			request: mustMarshal(t, jsonrpc.ServerRequest{JSONRPC: "2.0", Method: jsonrpc.MethodTasksList, Params: json.RawMessage(`{"pageSize": 125}`), ID: "123"}),
+			wantErr: a2a.ErrInvalidRequest,
 		},
 		{
 			name:    "invalid ID",
 			method:  "POST",
-			request: mustMarshal(t, jsonrpcRequest{JSONRPC: "2.0", Method: jsonrpc.MethodTasksGet, Params: query, ID: false}),
+			request: mustMarshal(t, jsonrpc.ServerRequest{JSONRPC: "2.0", Method: jsonrpc.MethodTasksGet, Params: query, ID: false}),
 			wantErr: a2a.ErrInvalidRequest,
 		},
 		{
 			name:    "http get",
 			method:  "GET",
-			request: mustMarshal(t, jsonrpcRequest{JSONRPC: "2.0", Method: jsonrpc.MethodTasksGet, Params: query}),
+			request: mustMarshal(t, jsonrpc.ServerRequest{JSONRPC: "2.0", Method: jsonrpc.MethodTasksGet, Params: query}),
 			wantErr: a2a.ErrInvalidRequest,
 		},
 		{
 			name:    "http delete",
 			method:  "DELETE",
-			request: mustMarshal(t, jsonrpcRequest{JSONRPC: "2.0", Method: jsonrpc.MethodTasksGet, Params: query}),
+			request: mustMarshal(t, jsonrpc.ServerRequest{JSONRPC: "2.0", Method: jsonrpc.MethodTasksGet, Params: query}),
 			wantErr: a2a.ErrInvalidRequest,
 		},
 		{
 			name:    "http put",
 			method:  "PUT",
-			request: mustMarshal(t, jsonrpcRequest{JSONRPC: "2.0", Method: jsonrpc.MethodTasksGet, Params: query}),
+			request: mustMarshal(t, jsonrpc.ServerRequest{JSONRPC: "2.0", Method: jsonrpc.MethodTasksGet, Params: query}),
 			wantErr: a2a.ErrInvalidRequest,
 		},
 		{
 			name:    "http patch",
 			method:  "PATCH",
-			request: mustMarshal(t, jsonrpcRequest{JSONRPC: "2.0", Method: jsonrpc.MethodTasksGet, Params: query}),
+			request: mustMarshal(t, jsonrpc.ServerRequest{JSONRPC: "2.0", Method: jsonrpc.MethodTasksGet, Params: query}),
 			wantErr: a2a.ErrInvalidRequest,
 		},
 		{
 			name:    "wrong version",
 			method:  "POST",
-			request: mustMarshal(t, jsonrpcRequest{JSONRPC: "99", Method: jsonrpc.MethodTasksGet, Params: query}),
+			request: mustMarshal(t, jsonrpc.ServerRequest{JSONRPC: "99", Method: jsonrpc.MethodTasksGet, Params: query}),
 			wantErr: a2a.ErrInvalidRequest,
 		},
 		{
 			name:    "invalid method",
 			method:  "POST",
-			request: mustMarshal(t, jsonrpcRequest{JSONRPC: "2.0", Method: "calculate", Params: query}),
+			request: mustMarshal(t, jsonrpc.ServerRequest{JSONRPC: "2.0", Method: "calculate", Params: query}),
 			wantErr: a2a.ErrMethodNotFound,
 		},
 		{
 			name:    "no method in jsonrpcRequest",
 			method:  "POST",
-			request: mustMarshal(t, jsonrpcRequest{JSONRPC: "2.0", Params: query}),
+			request: mustMarshal(t, jsonrpc.ServerRequest{JSONRPC: "2.0", Params: query}),
 			wantErr: a2a.ErrInvalidRequest,
 		},
 		{
 			name:    "invalid params error",
 			method:  "POST",
-			request: mustMarshal(t, jsonrpcRequest{JSONRPC: "2.0", Method: jsonrpc.MethodTasksGet, Params: json.RawMessage("[]")}),
+			request: mustMarshal(t, jsonrpc.ServerRequest{JSONRPC: "2.0", Method: jsonrpc.MethodTasksGet, Params: json.RawMessage("[]")}),
 			wantErr: a2a.ErrInvalidParams,
 		},
 	}
 
-	store := testutil.NewTestTaskStore().WithTasks(t, task)
+	store := testutil.NewTestTaskStoreWithConfig(&taskstore.InMemoryStoreConfig{
+		Authenticator: auth,
+	}).WithTasks(t, task)
 	reqHandler := NewHandler(&mockAgentExecutor{}, WithTaskStore(store))
 	server := httptest.NewServer(NewJSONRPCHandler(reqHandler))
 
@@ -241,7 +269,7 @@ func TestJSONRPC_Validations(t *testing.T) {
 			if resp.StatusCode != 200 {
 				t.Errorf("resp.StatusCode = %d, want 200", resp.StatusCode)
 			}
-			var payload jsonrpcResponse
+			var payload jsonrpc.ServerResponse
 			if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 				t.Errorf("decoder.Decode() error = %v", err)
 			}
@@ -257,7 +285,7 @@ func TestJSONRPC_Validations(t *testing.T) {
 					t.Errorf("payload.Error = %v, want nil", payload.Error.ToA2AError())
 				}
 				if diff := cmp.Diff(tc.want, payload.Result); diff != "" {
-					t.Errorf("payload.Result = %v, want %v", payload.Result, want)
+					t.Errorf("payload.Result = %v, want %v", payload.Result, tc.want)
 				}
 			}
 		})
@@ -268,7 +296,7 @@ func TestJSONRPC_StreamingKeepAlive(t *testing.T) {
 	agentTimeout := 20 * time.Millisecond
 	testCases := []struct {
 		name        string
-		option      JSONRPCHandlerOption
+		option      TransportOption
 		wantEnabled bool
 	}{
 		{
@@ -277,15 +305,15 @@ func TestJSONRPC_StreamingKeepAlive(t *testing.T) {
 		},
 		{
 			name:   "zero for disabled",
-			option: WithKeepAlive(0),
+			option: WithTransportKeepAlive(0),
 		},
 		{
 			name:   "negative for disabled",
-			option: WithKeepAlive(-1),
+			option: WithTransportKeepAlive(-1),
 		},
 		{
 			name:        "positive for enabled",
-			option:      WithKeepAlive(5 * time.Millisecond),
+			option:      WithTransportKeepAlive(5 * time.Millisecond),
 			wantEnabled: true,
 		},
 	}
@@ -296,16 +324,17 @@ func TestJSONRPC_StreamingKeepAlive(t *testing.T) {
 			ctx := t.Context()
 
 			mockExecutor := &mockAgentExecutor{
-				ExecuteFunc: func(ctx context.Context, reqCtx *RequestContext, queue eventqueue.Queue) error {
-					time.Sleep(agentTimeout)
-					if err := queue.Write(ctx, a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "test message"})); err != nil {
-						return err
+				ExecuteFunc: func(ctx context.Context, execCtx *ExecutorContext) iter.Seq2[a2a.Event, error] {
+					return func(yield func(a2a.Event, error) bool) {
+						time.Sleep(agentTimeout)
+						if !yield(a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("test message")), nil) {
+							return
+						}
 					}
-					return nil
 				},
 			}
 
-			opts := []JSONRPCHandlerOption{}
+			opts := []TransportOption{}
 			if tc.option != nil {
 				opts = append(opts, tc.option)
 			}
@@ -313,11 +342,11 @@ func TestJSONRPC_StreamingKeepAlive(t *testing.T) {
 			server := httptest.NewServer(NewJSONRPCHandler(reqHandler, opts...))
 			defer server.Close()
 
-			request := jsonrpcRequest{
+			request := jsonrpc.ServerRequest{
 				JSONRPC: "2.0",
 				Method:  jsonrpc.MethodMessageStream,
-				Params: mustMarshal(t, &a2a.MessageSendParams{
-					Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "hello"}),
+				Params: mustMarshal(t, &a2a.SendMessageRequest{
+					Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hello")),
 				}),
 				ID: 1,
 			}

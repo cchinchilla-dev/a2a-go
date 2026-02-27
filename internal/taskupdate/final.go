@@ -15,7 +15,7 @@
 package taskupdate
 
 import (
-	"github.com/a2aproject/a2a-go/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2a"
 )
 
 // IsFinal returns true if event must terminate a valid execution event sequence.
@@ -24,14 +24,15 @@ func IsFinal(event a2a.Event) bool {
 		return true
 	}
 
-	if statusUpdate, ok := event.(*a2a.TaskStatusUpdateEvent); ok {
-		return statusUpdate.Final
-	}
-
-	task, ok := event.(*a2a.Task)
-	if !ok {
+	var state a2a.TaskState
+	switch v := event.(type) {
+	case *a2a.TaskStatusUpdateEvent:
+		state = v.Status.State
+	case *a2a.Task:
+		state = v.Status.State
+	default:
 		return false
 	}
 
-	return task.Status.State.Terminal() || task.Status.State == a2a.TaskStateInputRequired
+	return state.Terminal() || state == a2a.TaskStateInputRequired
 }

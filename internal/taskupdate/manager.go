@@ -21,42 +21,38 @@ import (
 	"maps"
 	"slices"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/internal/utils"
-	"github.com/a2aproject/a2a-go/log"
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2asrv/taskstore"
+	"github.com/a2aproject/a2a-go/v1/internal/utils"
+	"github.com/a2aproject/a2a-go/v1/log"
 )
 
 const maxCancelationAttempts = 10
 
-type VersionedTask struct {
-	Task    *a2a.Task
-	Version a2a.TaskVersion
-}
-
-// Saver is used for saving the [a2a.Task] after updating its state.
-type Saver interface {
-	Get(ctx context.Context, taskID a2a.TaskID) (*a2a.Task, a2a.TaskVersion, error)
-	Save(ctx context.Context, task *a2a.Task, event a2a.Event, prev a2a.TaskVersion) (a2a.TaskVersion, error)
-}
-
 // Manager is used for processing [a2a.Event] related to an [a2a.Task]. It updates
-// the Task accordingly and uses [Saver] to store the new state.
+// the Task accordingly and uses [taskstore.Store] to store the new state.
 type Manager struct {
-	lastSaved *VersionedTask
-	saver     Saver
+	taskInfo   a2a.TaskInfo
+	lastStored *taskstore.StoredTask
+	store      taskstore.Store
 }
 
 // NewManager is a [Manager] constructor function.
-func NewManager(saver Saver, task *VersionedTask) *Manager {
+func NewManager(store taskstore.Store, info a2a.TaskInfo, task *taskstore.StoredTask) *Manager {
 	return &Manager{
-		lastSaved: task,
-		saver:     saver,
+		taskInfo:   info,
+		lastStored: task,
+		store:      store,
 	}
 }
 
 // SetTaskFailed attempts to move the Task to failed state and returns it in case of a success.
-func (mgr *Manager) SetTaskFailed(ctx context.Context, event a2a.Event, cause error) (*VersionedTask, error) {
-	task := *mgr.lastSaved.Task // copy to update task status
+func (mgr *Manager) SetTaskFailed(ctx context.Context, event a2a.Event, cause error) (*taskstore.StoredTask, error) {
+	if mgr.lastStored == nil {
+		return nil, fmt.Errorf("execution failed before a task was created: %w", cause)
+	}
+
+	task := *mgr.lastStored.Task // copy to update task status
 
 	// do not store cause.Error() as part of status to not disclose the cause to clients
 	task.Status = a2a.TaskStatus{State: a2a.TaskStateFailed}
@@ -66,33 +62,41 @@ func (mgr *Manager) SetTaskFailed(ctx context.Context, event a2a.Event, cause er
 	}
 
 	log.Info(ctx, "task moved to failed state", "cause", cause.Error())
-	return mgr.lastSaved, nil
+	return mgr.lastStored, nil
 }
 
 // Process validates the event associated with the managed [a2a.Task] and integrates the new state into it.
-func (mgr *Manager) Process(ctx context.Context, event a2a.Event) (*VersionedTask, error) {
-	if mgr.lastSaved == nil || mgr.lastSaved.Task == nil {
-		return nil, fmt.Errorf("event processor Task not set")
+func (mgr *Manager) Process(ctx context.Context, event a2a.Event) (*taskstore.StoredTask, error) {
+	if _, ok := event.(*a2a.Message); ok {
+		if mgr.lastStored != nil {
+			return nil, fmt.Errorf("message not allowed after task was stored: %w", a2a.ErrInvalidAgentResponse)
+		}
+		return nil, nil
 	}
 
-	switch v := event.(type) {
-	case *a2a.Message:
-		return mgr.lastSaved, nil
-
-	case *a2a.Task:
-		if err := mgr.validate(v.ID, v.ContextID); err != nil {
+	if v, ok := event.(*a2a.Task); ok {
+		if err := mgr.validate(v); err != nil {
 			return nil, err
 		}
 		return mgr.saveTask(ctx, v, event)
+	}
 
+	if mgr.lastStored == nil {
+		return nil, fmt.Errorf("first event must be a Task or a message: %w", a2a.ErrInvalidAgentResponse)
+	}
+
+	switch v := event.(type) {
 	case *a2a.TaskArtifactUpdateEvent:
-		if err := mgr.validate(v.TaskID, v.ContextID); err != nil {
+		if err := mgr.validate(v); err != nil {
 			return nil, err
+		}
+		if len(v.Artifact.Parts) == 0 {
+			return nil, fmt.Errorf("artifact cannot be empty: %w", a2a.ErrInvalidAgentResponse)
 		}
 		return mgr.updateArtifact(ctx, v)
 
 	case *a2a.TaskStatusUpdateEvent:
-		if err := mgr.validate(v.TaskID, v.ContextID); err != nil {
+		if err := mgr.validate(v); err != nil {
 			return nil, err
 		}
 		return mgr.updateStatus(ctx, v)
@@ -102,8 +106,8 @@ func (mgr *Manager) Process(ctx context.Context, event a2a.Event) (*VersionedTas
 	}
 }
 
-func (mgr *Manager) updateArtifact(ctx context.Context, event *a2a.TaskArtifactUpdateEvent) (*VersionedTask, error) {
-	task := mgr.lastSaved.Task
+func (mgr *Manager) updateArtifact(ctx context.Context, event *a2a.TaskArtifactUpdateEvent) (*taskstore.StoredTask, error) {
+	task := mgr.lastStored.Task
 
 	// The copy is required because the event will be passed to subscriber goroutines, while
 	// the artifact might be modified in our goroutine by other TaskArtifactUpdateEvent-s.
@@ -140,14 +144,14 @@ func (mgr *Manager) updateArtifact(ctx context.Context, event *a2a.TaskArtifactU
 	return mgr.saveTask(ctx, task, event)
 }
 
-func (mgr *Manager) updateStatus(ctx context.Context, event *a2a.TaskStatusUpdateEvent) (*VersionedTask, error) {
-	task, err := utils.DeepCopy(mgr.lastSaved.Task)
+func (mgr *Manager) updateStatus(ctx context.Context, event *a2a.TaskStatusUpdateEvent) (*taskstore.StoredTask, error) {
+	lastStored, err := utils.DeepCopy(mgr.lastStored)
 	if err != nil {
 		return nil, err
 	}
-	version := mgr.lastSaved.Version
 
 	for range maxCancelationAttempts {
+		task := lastStored.Task
 		if task.Status.Message != nil {
 			task.History = append(task.History, task.Status.Message)
 		}
@@ -159,7 +163,7 @@ func (mgr *Manager) updateStatus(ctx context.Context, event *a2a.TaskStatusUpdat
 		}
 		task.Status = event.Status
 
-		vt, err := mgr.saveVersionedTask(ctx, task, event, version)
+		vt, err := mgr.saveVersionedTask(ctx, task, event, lastStored.Version)
 		if err == nil {
 			return vt, nil
 		}
@@ -168,46 +172,59 @@ func (mgr *Manager) updateStatus(ctx context.Context, event *a2a.TaskStatusUpdat
 			return nil, err
 		}
 
-		latestTask, latestVersion, getErr := mgr.saver.Get(ctx, event.TaskID)
+		storedTask, getErr := mgr.store.Get(ctx, event.TaskID)
 		if getErr != nil {
 			return nil, fmt.Errorf("failed to get task: %w", getErr)
 		}
 
-		if latestTask.Status.State == a2a.TaskStateCanceled {
-			mgr.lastSaved = &VersionedTask{Task: latestTask, Version: latestVersion}
-			return mgr.lastSaved, nil
+		if storedTask.Task.Status.State == a2a.TaskStateCanceled {
+			mgr.lastStored = storedTask
+			return mgr.lastStored, nil
+		}
+		if storedTask.Task.Status.State.Terminal() {
+			return nil, fmt.Errorf("task moved to %q before it could be cancelled", storedTask.Task.Status.State)
 		}
 
-		if latestTask.Status.State.Terminal() {
-			return nil, fmt.Errorf("task moved to %q before it could be cancelled", latestTask.Status.State)
-		}
-
-		task, version = latestTask, latestVersion
+		lastStored = storedTask
 	}
 
 	return nil, fmt.Errorf("max task cancelation attempts reached")
 }
 
-func (mgr *Manager) saveTask(ctx context.Context, task *a2a.Task, event a2a.Event) (*VersionedTask, error) {
-	return mgr.saveVersionedTask(ctx, task, event, mgr.lastSaved.Version)
+func (mgr *Manager) saveTask(ctx context.Context, task *a2a.Task, event a2a.Event) (*taskstore.StoredTask, error) {
+	version := taskstore.TaskVersionMissing
+	if mgr.lastStored != nil {
+		version = mgr.lastStored.Version
+	}
+	return mgr.saveVersionedTask(ctx, task, event, version)
 }
 
-func (mgr *Manager) saveVersionedTask(ctx context.Context, task *a2a.Task, event a2a.Event, version a2a.TaskVersion) (*VersionedTask, error) {
-	version, err := mgr.saver.Save(ctx, task, event, version)
+func (mgr *Manager) saveVersionedTask(ctx context.Context, task *a2a.Task, event a2a.Event, prevVersion taskstore.TaskVersion) (*taskstore.StoredTask, error) {
+	var version taskstore.TaskVersion
+	var err error
+	if mgr.lastStored == nil {
+		version, err = mgr.store.Create(ctx, task)
+	} else {
+		version, err = mgr.store.Update(ctx, &taskstore.UpdateRequest{
+			Task:        task,
+			Event:       event,
+			PrevVersion: prevVersion,
+		})
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to save task state: %w", err)
 	}
-	mgr.lastSaved = &VersionedTask{Task: task, Version: version}
-	return mgr.lastSaved, nil
+	mgr.lastStored = &taskstore.StoredTask{Task: task, Version: version}
+	return mgr.lastStored, nil
 }
 
-func (mgr *Manager) validate(taskID a2a.TaskID, contextID string) error {
-	task := mgr.lastSaved.Task
-	if task.ID != taskID {
-		return fmt.Errorf("task IDs don't match: %s != %s", task.ID, taskID)
+func (mgr *Manager) validate(provider a2a.TaskInfoProvider) error {
+	info := provider.TaskInfo()
+	if mgr.taskInfo.TaskID != info.TaskID {
+		return fmt.Errorf("task IDs don't match: %s != %s", info.TaskID, mgr.taskInfo.TaskID)
 	}
-	if task.ContextID != contextID {
-		return fmt.Errorf("context IDs don't match: %s != %s", task.ContextID, contextID)
+	if mgr.taskInfo.ContextID != info.ContextID {
+		return fmt.Errorf("context IDs don't match: %s != %s", info.ContextID, mgr.taskInfo.ContextID)
 	}
 	return nil
 }

@@ -12,20 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package main provides a hello world gRPC server example.
 package main
 
 import (
 	"context"
 	"flag"
 	"fmt"
+	"iter"
 	"log"
 	"net"
 	"net/http"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2agrpc"
-	"github.com/a2aproject/a2a-go/a2asrv"
-	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2agrpc/v1"
+	"github.com/a2aproject/a2a-go/v1/a2asrv"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 )
@@ -36,13 +37,15 @@ type agentExecutor struct{}
 
 var _ a2asrv.AgentExecutor = (*agentExecutor)(nil)
 
-func (*agentExecutor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, q eventqueue.Queue) error {
-	response := a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "Hello, world!"})
-	return q.Write(ctx, response)
+func (*agentExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+	return func(yield func(a2a.Event, error) bool) {
+		response := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("Hello, world!"))
+		yield(response, nil)
+	}
 }
 
-func (*agentExecutor) Cancel(ctx context.Context, reqCtx *a2asrv.RequestContext, q eventqueue.Queue) error {
-	return nil
+func (*agentExecutor) Cancel(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+	return func(yield func(a2a.Event, error) bool) {}
 }
 
 func startGRPCServer(port int, card *a2a.AgentCard) error {
@@ -86,11 +89,13 @@ var (
 func main() {
 	flag.Parse()
 
+	addr := fmt.Sprintf("127.0.0.1:%d", *grpcPort)
 	agentCard := &a2a.AgentCard{
-		Name:               "Hello World Agent",
-		Description:        "Just a hello world agent",
-		URL:                fmt.Sprintf("127.0.0.1:%d", *grpcPort),
-		PreferredTransport: a2a.TransportProtocolGRPC,
+		Name:        "Hello World Agent",
+		Description: "Just a hello world agent",
+		SupportedInterfaces: []*a2a.AgentInterface{
+			a2a.NewAgentInterface(addr, a2a.TransportProtocolGRPC),
+		},
 		DefaultInputModes:  []string{"text"},
 		DefaultOutputModes: []string{"text"},
 		Capabilities:       a2a.AgentCapabilities{Streaming: true},

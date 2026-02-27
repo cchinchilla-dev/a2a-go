@@ -40,73 +40,21 @@ func mustUnmarshal(t *testing.T, data []byte, out any) {
 	}
 }
 
-func TestFilePartJSONCodec(t *testing.T) {
-	testCases := []struct {
-		json string
-		part FilePart
-	}{
-		{
-			part: FilePart{File: FileURI{URI: "uri"}},
-			json: `{"kind":"file","file":{"uri":"uri"}}`,
-		},
-		{
-			part: FilePart{File: FileBytes{Bytes: "abc"}},
-			json: `{"kind":"file","file":{"bytes":"abc"}}`,
-		},
-		{
-			part: FilePart{File: FileBytes{Bytes: "abc", FileMeta: FileMeta{Name: "foo"}}},
-			json: `{"kind":"file","file":{"name":"foo","bytes":"abc"}}`,
-		},
-		{
-			part: FilePart{File: FileBytes{Bytes: "abc", FileMeta: FileMeta{Name: "foo", MimeType: "mime"}}},
-			json: `{"kind":"file","file":{"mimeType":"mime","name":"foo","bytes":"abc"}}`,
-		},
-		{
-			part: FilePart{File: FileURI{URI: "uri", FileMeta: FileMeta{Name: "foo", MimeType: "mime"}}},
-			json: `{"kind":"file","file":{"mimeType":"mime","name":"foo","uri":"uri"}}`,
-		},
-	}
-	for _, tc := range testCases {
-		if got := mustMarshal(t, tc.part); got != tc.json {
-			t.Fatalf("Marshal() failed:\nwant %v\ngot: %s", tc.json, got)
-		}
-
-		got := FilePart{}
-		mustUnmarshal(t, []byte(tc.json), &got)
-		if !reflect.DeepEqual(got, tc.part) {
-			t.Fatalf("Unmarshal() failed for %s:\nwant %v\ngot: %s", tc.json, tc.part, got)
-		}
-	}
-}
-
-func TestFilePartJSONDecodingFailure(t *testing.T) {
-	malformed := []string{
-		`{"kind":"file"}`,
-		`{"kind":"file","file":{}}`,
-		`{"kind":"file","file":{"name":"foo","mimeType":"mime","uri":"uri","bytes":"abc"}}`,
-		`{"kind":"file","file":{"name":"foo","mimeType":"mime"}}`,
-	}
-	for _, v := range malformed {
-		got := FilePart{}
-		if err := json.Unmarshal([]byte(v), &got); err == nil {
-			t.Fatalf("Unmarshal() expected to fail for %s, got: %v", v, got)
-		}
-	}
-}
-
 func TestContentPartsJSONCodec(t *testing.T) {
 	parts := ContentParts{
-		TextPart{Text: "hello, world"},
-		FilePart{File: FileBytes{Bytes: "abc", FileMeta: FileMeta{Name: "foo", MimeType: "mime"}}},
-		DataPart{Data: map[string]any{"foo": "bar"}},
-		TextPart{Text: "42", Metadata: map[string]any{"foo": "bar"}},
+		NewTextPart("hello, world"),
+		NewDataPart(map[string]any{"foo": "bar"}),
+		{Content: URL("https://cats.com/1.png"), Filename: "foo"},
+		{Content: Raw([]byte{0xFF, 0xFE}), Filename: "foo", MediaType: "image/png"},
+		{Content: Text("42"), Metadata: map[string]any{"foo": "bar"}},
 	}
 
 	jsons := []string{
-		`{"kind":"text","text":"hello, world"}`,
-		`{"kind":"file","file":{"mimeType":"mime","name":"foo","bytes":"abc"}}`,
-		`{"kind":"data","data":{"foo":"bar"}}`,
-		`{"kind":"text","text":"42","metadata":{"foo":"bar"}}`,
+		`{"text":"hello, world"}`,
+		`{"data":{"foo":"bar"}}`,
+		`{"filename":"foo","url":"https://cats.com/1.png"}`,
+		`{"filename":"foo","mediaType":"image/png","raw":"//4="}`,
+		`{"foo":"bar","text":"42"}`,
 	}
 
 	wantJSON := fmt.Sprintf("[%s]", strings.Join(jsons, ","))
@@ -117,32 +65,30 @@ func TestContentPartsJSONCodec(t *testing.T) {
 	var got ContentParts
 	mustUnmarshal(t, []byte(wantJSON), &got)
 	if !reflect.DeepEqual(got, parts) {
-		t.Fatalf("Unmarshal() failed:\nwant %v\ngot: %s", parts, got)
+		t.Fatalf("Unmarshal() failed:\nwant %#v\ngot: %#v", parts, got)
 	}
 }
 
 func TestSecuritySchemeJSONCodec(t *testing.T) {
 	schemes := NamedSecuritySchemes{
-		"name1": APIKeySecurityScheme{Name: "abc", In: APIKeySecuritySchemeInCookie},
+		"name1": APIKeySecurityScheme{Name: "abc", Location: APIKeySecuritySchemeLocationCookie},
 		"name2": OpenIDConnectSecurityScheme{OpenIDConnectURL: "url"},
 		"name3": MutualTLSSecurityScheme{Description: "optional"},
 		"name4": HTTPAuthSecurityScheme{Scheme: "Bearer", BearerFormat: "JWT"},
 		"name5": OAuth2SecurityScheme{
-			Flows: OAuthFlows{
-				Password: &PasswordOAuthFlow{
-					TokenURL: "url",
-					Scopes:   map[string]string{"email": "read user emails"},
-				},
+			Flows: PasswordOAuthFlow{
+				TokenURL: "url",
+				Scopes:   map[string]string{"email": "read user emails"},
 			},
 		},
 	}
 
 	entriesJSON := []string{
-		`"name1":{"type":"apiKey","in":"cookie","name":"abc"}`,
-		`"name2":{"type":"openIdConnect","openIdConnectUrl":"url"}`,
-		`"name3":{"type":"mutualTLS","description":"optional"}`,
-		`"name4":{"type":"http","bearerFormat":"JWT","scheme":"Bearer"}`,
-		`"name5":{"type":"oauth2","flows":{"password":{"scopes":{"email":"read user emails"},"tokenUrl":"url"}}}`,
+		`"name1":{"apiKey":{"location":"cookie","name":"abc"}}`,
+		`"name2":{"openIdConnect":{"openIdConnectUrl":"url"}}`,
+		`"name3":{"mutualTLS":{"description":"optional"}}`,
+		`"name4":{"http":{"bearerFormat":"JWT","scheme":"Bearer"}}`,
+		`"name5":{"oauth2":{"flows":{"password":{"scopes":{"email":"read user emails"},"tokenUrl":"url"}}}}`,
 	}
 	wantJSON := fmt.Sprintf("{%s}", strings.Join(entriesJSON, ","))
 
@@ -152,7 +98,7 @@ func TestSecuritySchemeJSONCodec(t *testing.T) {
 		t.Fatalf("Unmarshal() failed:\nwant %v\ngot: %s", schemes, decodedJSON)
 	}
 
-	encodedSchemes := mustMarshal(t, schemes)
+	encodedSchemes := mustMarshal(t, &schemes)
 	var decodedBack NamedSecuritySchemes
 	mustUnmarshal(t, []byte(encodedSchemes), &decodedBack)
 	if !reflect.DeepEqual(decodedJSON, decodedBack) {
@@ -160,33 +106,15 @@ func TestSecuritySchemeJSONCodec(t *testing.T) {
 	}
 }
 
-func TestEventMarshalEmptyContentParts(t *testing.T) {
-	event := &TaskArtifactUpdateEvent{Artifact: &Artifact{ID: "art-123"}}
-	jsonBytes, err := json.Marshal(event)
-	if err != nil {
-		t.Fatalf("Marshal() failed: %v", err)
-	}
-	var decoded TaskArtifactUpdateEvent
-	if err := json.Unmarshal(jsonBytes, &decoded); err != nil {
-		t.Fatalf("Unmarshal() failed: %v", err)
-	}
-	if !strings.Contains(string(jsonBytes), `"parts":[]`) {
-		t.Fatalf("json.Marshal() = %q, want parts to be non-nil", string(jsonBytes))
-	}
-}
-
 func TestAgentCardParsing(t *testing.T) {
 	cardJSON := `
 {
-  "protocolVersion": "0.2.9",
   "name": "GeoSpatial Route Planner Agent",
   "description": "Provides advanced route planning, traffic analysis, and custom map generation services. This agent can calculate optimal routes, estimate travel times considering real-time traffic, and create personalized maps with points of interest.",
-  "url": "https://georoute-agent.example.com/a2a/v1",
-  "preferredTransport": "JSONRPC",
-  "additionalInterfaces" : [
-    {"url": "https://georoute-agent.example.com/a2a/v1", "transport": "JSONRPC"},
-    {"url": "https://georoute-agent.example.com/a2a/grpc", "transport": "GRPC"},
-    {"url": "https://georoute-agent.example.com/a2a/json", "transport": "HTTP+JSON"}
+  "supportedInterfaces" : [
+    {"url": "https://georoute-agent.example.com/a2a/v1", "protocolBinding": "JSONRPC", "protocolVersion": "1.0"},
+    {"url": "https://georoute-agent.example.com/a2a/grpc", "protocolBinding": "GRPC", "protocolVersion": "1.0"},
+    {"url": "https://georoute-agent.example.com/a2a/json", "protocolBinding": "HTTP+JSON", "protocolVersion": "1.0"}
   ],
   "provider": {
     "organization": "Example Geo Services Inc.",
@@ -198,15 +126,16 @@ func TestAgentCardParsing(t *testing.T) {
   "capabilities": {
     "streaming": true,
     "pushNotifications": true,
-    "stateTransitionHistory": false
+    "extendedAgentCard": true
   },
   "securitySchemes": {
     "google": {
-      "type": "openIdConnect",
-      "openIdConnectUrl": "https://accounts.google.com/.well-known/openid-configuration"
+      "openIdConnect": {
+        "openIdConnectUrl": "https://accounts.google.com/.well-known/openid-configuration"
+      }
     }
   },
-  "security": [{ "google": ["openid", "profile", "email"] }],
+  "securityRequirements": [{ "schemes": { "google": ["openid", "profile", "email"] } }],
   "defaultInputModes": ["application/json", "text/plain"],
   "defaultOutputModes": ["application/json", "image/png"],
   "skills": [
@@ -224,7 +153,8 @@ func TestAgentCardParsing(t *testing.T) {
         "application/json",
         "application/vnd.geo+json",
         "text/html"
-      ]
+      ],
+      "securityRequirements": [{ "schemes": { "google": ["https://www.googleapis.com/auth/maps"] } }]
     },
     {
       "id": "custom-map-generator",
@@ -244,7 +174,6 @@ func TestAgentCardParsing(t *testing.T) {
       ]
     }
   ],
-  "supportsAuthenticatedExtendedCard": true,
   "signatures": [
     {
       "protected": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpPU0UiLCJraWQiOiJrZXktMSIsImprdSI6Imh0dHBzOi8vZXhhbXBsZS5jb20vYWdlbnQvandrcy5qc29uIn0",
@@ -254,15 +183,12 @@ func TestAgentCardParsing(t *testing.T) {
 }
 `
 	want := AgentCard{
-		ProtocolVersion:    "0.2.9",
-		Name:               "GeoSpatial Route Planner Agent",
-		Description:        "Provides advanced route planning, traffic analysis, and custom map generation services. This agent can calculate optimal routes, estimate travel times considering real-time traffic, and create personalized maps with points of interest.",
-		URL:                "https://georoute-agent.example.com/a2a/v1",
-		PreferredTransport: TransportProtocolJSONRPC,
-		AdditionalInterfaces: []AgentInterface{
-			{URL: "https://georoute-agent.example.com/a2a/v1", Transport: TransportProtocolJSONRPC},
-			{URL: "https://georoute-agent.example.com/a2a/grpc", Transport: TransportProtocolGRPC},
-			{URL: "https://georoute-agent.example.com/a2a/json", Transport: TransportProtocolHTTPJSON},
+		Name:        "GeoSpatial Route Planner Agent",
+		Description: "Provides advanced route planning, traffic analysis, and custom map generation services. This agent can calculate optimal routes, estimate travel times considering real-time traffic, and create personalized maps with points of interest.",
+		SupportedInterfaces: []*AgentInterface{
+			{URL: "https://georoute-agent.example.com/a2a/v1", ProtocolBinding: TransportProtocolJSONRPC, ProtocolVersion: Version},
+			{URL: "https://georoute-agent.example.com/a2a/grpc", ProtocolBinding: TransportProtocolGRPC, ProtocolVersion: Version},
+			{URL: "https://georoute-agent.example.com/a2a/json", ProtocolBinding: TransportProtocolHTTPJSON, ProtocolVersion: Version},
 		},
 		Provider: &AgentProvider{
 			Org: "Example Geo Services Inc.",
@@ -271,13 +197,21 @@ func TestAgentCardParsing(t *testing.T) {
 		IconURL:          "https://georoute-agent.example.com/icon.png",
 		Version:          "1.2.0",
 		DocumentationURL: "https://docs.examplegeoservices.com/georoute-agent/api",
-		Capabilities:     AgentCapabilities{Streaming: true, PushNotifications: true, StateTransitionHistory: false},
+		Capabilities: AgentCapabilities{
+			Streaming:         true,
+			PushNotifications: true,
+			ExtendedAgentCard: true,
+		},
 		SecuritySchemes: NamedSecuritySchemes{
 			SecuritySchemeName("google"): OpenIDConnectSecurityScheme{
 				OpenIDConnectURL: "https://accounts.google.com/.well-known/openid-configuration",
 			},
 		},
-		Security:           []SecurityRequirements{{SecuritySchemeName("google"): []string{"openid", "profile", "email"}}},
+		SecurityRequirements: SecurityRequirementsOptions{
+			{
+				SecuritySchemeName("google"): []string{"openid", "profile", "email"},
+			},
+		},
 		DefaultInputModes:  []string{"application/json", "text/plain"},
 		DefaultOutputModes: []string{"application/json", "image/png"},
 		Skills: []AgentSkill{
@@ -292,6 +226,11 @@ func TestAgentCardParsing(t *testing.T) {
 				},
 				InputModes:  []string{"application/json", "text/plain"},
 				OutputModes: []string{"application/json", "application/vnd.geo+json", "text/html"},
+				SecurityRequirements: SecurityRequirementsOptions{
+					{
+						SecuritySchemeName("google"): []string{"https://www.googleapis.com/auth/maps"},
+					},
+				},
 			},
 			{
 				ID:          "custom-map-generator",
@@ -306,7 +245,6 @@ func TestAgentCardParsing(t *testing.T) {
 				OutputModes: []string{"image/png", "image/jpeg", "application/json", "text/html"},
 			},
 		},
-		SupportsAuthenticatedExtendedCard: true,
 		Signatures: []AgentCardSignature{
 			{
 				Protected: "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpPU0UiLCJraWQiOiJrZXktMSIsImprdSI6Imh0dHBzOi8vZXhhbXBsZS5jb20vYWdlbnQvandrcy5qc29uIn0",
@@ -321,6 +259,40 @@ func TestAgentCardParsing(t *testing.T) {
 	}
 
 	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("AgentCard codec:\ngot %v\nwant %v\ndiff(-want +got):\n%v", got, want, diff)
+		t.Errorf("AgentCard codec diff(-want +got):\n%v", diff)
+	}
+}
+
+func TestTaskState_Codec(t *testing.T) {
+	stateToLabel := map[TaskState]string{
+		TaskStateUnspecified:   "",
+		TaskStateAuthRequired:  "AUTH_REQUIRED",
+		TaskStateCanceled:      "CANCELED",
+		TaskStateCompleted:     "COMPLETED",
+		TaskStateFailed:        "FAILED",
+		TaskStateInputRequired: "INPUT_REQUIRED",
+		TaskStateRejected:      "REJECTED",
+		TaskStateSubmitted:     "SUBMITTED",
+		TaskStateUnknown:       "UNKNOWN",
+		TaskStateWorking:       "WORKING",
+	}
+
+	for state, label := range stateToLabel {
+		bytes, err := json.Marshal(state)
+		if err != nil {
+			t.Fatalf("failed to marshal: %v", err)
+		}
+		expectedJSON := `"` + label + `"`
+		if string(bytes) != expectedJSON {
+			t.Errorf("got %s, want %s", bytes, expectedJSON)
+		}
+
+		var got TaskState
+		if err := json.Unmarshal([]byte(expectedJSON), &got); err != nil {
+			t.Fatalf("failed to unmarshal: %v", err)
+		}
+		if got != state {
+			t.Errorf("got %s, want %s", got, state)
+		}
 	}
 }

@@ -21,8 +21,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/internal/testutil"
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2asrv/eventqueue"
+	"github.com/a2aproject/a2a-go/v1/a2asrv/taskstore"
+	"github.com/a2aproject/a2a-go/v1/internal/testutil"
 	"github.com/google/go-cmp/cmp"
 )
 
@@ -32,9 +34,9 @@ func TestRemoteSubscription_Events(t *testing.T) {
 	tests := []struct {
 		name            string
 		snapshot        *a2a.Task
-		snapshotVersion a2a.TaskVersion
+		snapshotVersion taskstore.TaskVersion
 		events          []a2a.Event
-		eventVersions   []a2a.TaskVersion
+		eventVersions   []taskstore.TaskVersion
 		wantEvents      []a2a.Event
 		getTaskErr      error
 		queueReadErr    error
@@ -70,35 +72,35 @@ func TestRemoteSubscription_Events(t *testing.T) {
 			snapshot: &a2a.Task{ID: tid, Status: a2a.TaskStatus{State: a2a.TaskStateSubmitted}},
 			events: []a2a.Event{
 				&a2a.TaskStatusUpdateEvent{TaskID: tid, Status: a2a.TaskStatus{State: a2a.TaskStateWorking}},
-				&a2a.TaskStatusUpdateEvent{TaskID: tid, Status: a2a.TaskStatus{State: a2a.TaskStateCompleted}, Final: true},
+				&a2a.TaskStatusUpdateEvent{TaskID: tid, Status: a2a.TaskStatus{State: a2a.TaskStateCompleted}},
 				&a2a.TaskStatusUpdateEvent{TaskID: tid, Status: a2a.TaskStatus{State: a2a.TaskStateFailed}}, // not received
 			},
 			wantEvents: []a2a.Event{
 				&a2a.Task{ID: tid, Status: a2a.TaskStatus{State: a2a.TaskStateSubmitted}},
 				&a2a.TaskStatusUpdateEvent{TaskID: tid, Status: a2a.TaskStatus{State: a2a.TaskStateWorking}},
-				&a2a.TaskStatusUpdateEvent{TaskID: tid, Status: a2a.TaskStatus{State: a2a.TaskStateCompleted}, Final: true},
+				&a2a.TaskStatusUpdateEvent{TaskID: tid, Status: a2a.TaskStatus{State: a2a.TaskStateCompleted}},
 			},
 		},
 		{
 			name:            "events older than snapshot are skipped",
 			snapshot:        &a2a.Task{ID: tid, Status: a2a.TaskStatus{State: a2a.TaskStateInputRequired}},
-			snapshotVersion: a2a.TaskVersion(2),
+			snapshotVersion: taskstore.TaskVersion(2),
 			events: []a2a.Event{
 				&a2a.TaskStatusUpdateEvent{TaskID: tid, Status: a2a.TaskStatus{State: a2a.TaskStateSubmitted}},
 				&a2a.TaskStatusUpdateEvent{TaskID: tid, Status: a2a.TaskStatus{State: a2a.TaskStateInputRequired}},
 				&a2a.TaskStatusUpdateEvent{TaskID: tid, Status: a2a.TaskStatus{State: a2a.TaskStateWorking}},
-				&a2a.TaskStatusUpdateEvent{TaskID: tid, Status: a2a.TaskStatus{State: a2a.TaskStateCompleted}, Final: true},
+				&a2a.TaskStatusUpdateEvent{TaskID: tid, Status: a2a.TaskStatus{State: a2a.TaskStateCompleted}},
 			},
-			eventVersions: []a2a.TaskVersion{
+			eventVersions: []taskstore.TaskVersion{
 				// older than snapshot
-				a2a.TaskVersion(1), a2a.TaskVersion(2),
+				taskstore.TaskVersion(1), taskstore.TaskVersion(2),
 				// newer than snapshot
-				a2a.TaskVersion(3), a2a.TaskVersion(4),
+				taskstore.TaskVersion(3), taskstore.TaskVersion(4),
 			},
 			wantEvents: []a2a.Event{
 				&a2a.Task{ID: tid, Status: a2a.TaskStatus{State: a2a.TaskStateInputRequired}},
 				&a2a.TaskStatusUpdateEvent{TaskID: tid, Status: a2a.TaskStatus{State: a2a.TaskStateWorking}},
-				&a2a.TaskStatusUpdateEvent{TaskID: tid, Status: a2a.TaskStatus{State: a2a.TaskStateCompleted}, Final: true},
+				&a2a.TaskStatusUpdateEvent{TaskID: tid, Status: a2a.TaskStatus{State: a2a.TaskStateCompleted}},
 			},
 		},
 		{
@@ -126,33 +128,33 @@ func TestRemoteSubscription_Events(t *testing.T) {
 			t.Parallel()
 			store := testutil.NewTestTaskStore()
 			if tc.getTaskErr != nil {
-				store.GetFunc = func(context.Context, a2a.TaskID) (*a2a.Task, a2a.TaskVersion, error) {
-					return nil, a2a.TaskVersionMissing, tc.getTaskErr
+				store.GetFunc = func(context.Context, a2a.TaskID) (*taskstore.StoredTask, error) {
+					return nil, tc.getTaskErr
 				}
 			} else if tc.snapshot != nil {
-				version := a2a.TaskVersionMissing
-				if tc.snapshotVersion != a2a.TaskVersionMissing {
+				version := taskstore.TaskVersionMissing
+				if tc.snapshotVersion != taskstore.TaskVersionMissing {
 					version = tc.snapshotVersion
 				}
-				store.GetFunc = func(context.Context, a2a.TaskID) (*a2a.Task, a2a.TaskVersion, error) {
-					return tc.snapshot, version, nil
+				store.GetFunc = func(context.Context, a2a.TaskID) (*taskstore.StoredTask, error) {
+					return &taskstore.StoredTask{Task: tc.snapshot, Version: version}, nil
 				}
 			}
 
 			queue := testutil.NewTestEventQueue()
 			events, eventVersions := tc.events, tc.eventVersions
-			queue.ReadFunc = func(context.Context) (a2a.Event, a2a.TaskVersion, error) {
+			queue.ReadFunc = func(context.Context) (*eventqueue.Message, error) {
 				if len(events) == 0 {
-					return nil, a2a.TaskVersionMissing, tc.queueReadErr
+					return nil, tc.queueReadErr
 				}
-				version := a2a.TaskVersionMissing
+				version := taskstore.TaskVersionMissing
 				if len(eventVersions) > 0 {
 					version = eventVersions[0]
 					eventVersions = eventVersions[1:]
 				}
 				event := events[0]
 				events = events[1:]
-				return event, version, nil
+				return &eventqueue.Message{Event: event, TaskVersion: version}, nil
 			}
 			queueClosed := false
 			queue.CloseFunc = func() error {

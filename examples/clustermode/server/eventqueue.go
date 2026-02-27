@@ -17,32 +17,34 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
-	"github.com/a2aproject/a2a-go/log"
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2asrv/eventqueue"
+	"github.com/a2aproject/a2a-go/v1/a2asrv/taskstore"
+	"github.com/a2aproject/a2a-go/v1/log"
 )
 
 type dbEventQueueManager struct {
 	db *sql.DB
 
 	mu     sync.Mutex
-	queues map[a2a.TaskID][]*dbEventQueue
+	queues map[a2a.TaskID][]*dbEventQueueReader
 }
 
 func newDBEventQueueManager(db *sql.DB) *dbEventQueueManager {
 	return &dbEventQueueManager{
 		db:     db,
-		queues: make(map[a2a.TaskID][]*dbEventQueue),
+		queues: make(map[a2a.TaskID][]*dbEventQueueReader),
 	}
 }
 
 var _ eventqueue.Manager = (*dbEventQueueManager)(nil)
 
-func (m *dbEventQueueManager) GetOrCreate(ctx context.Context, taskID a2a.TaskID) (eventqueue.Queue, error) {
+func (m *dbEventQueueManager) CreateReader(ctx context.Context, taskID a2a.TaskID) (eventqueue.Reader, error) {
 	var pollFromID sql.NullString
 	err := m.db.QueryRowContext(ctx, `SELECT MAX(id) FROM task_event WHERE task_id = ?`, taskID).Scan(&pollFromID)
 
@@ -59,9 +61,8 @@ func (m *dbEventQueueManager) GetOrCreate(ctx context.Context, taskID a2a.TaskID
 	return q, nil
 }
 
-func (m *dbEventQueueManager) Get(ctx context.Context, taskID a2a.TaskID) (eventqueue.Queue, bool) {
-	q, err := m.GetOrCreate(ctx, taskID)
-	return q, err == nil
+func (m *dbEventQueueManager) CreateWriter(ctx context.Context, taskID a2a.TaskID) (eventqueue.Writer, error) {
+	return dbEventQueueWriter{}, nil
 }
 
 func (m *dbEventQueueManager) Destroy(ctx context.Context, taskID a2a.TaskID) error {
@@ -78,19 +79,19 @@ func (m *dbEventQueueManager) Destroy(ctx context.Context, taskID a2a.TaskID) er
 
 type versionedEvent struct {
 	event   a2a.Event
-	version a2a.TaskVersion
+	version taskstore.TaskVersion
 }
 
-type dbEventQueue struct {
+type dbEventQueueReader struct {
 	closeSignal chan struct{}
 	closed      chan struct{}
 	eventsCh    chan *versionedEvent
 }
 
-var _ eventqueue.Queue = (*dbEventQueue)(nil)
+var _ eventqueue.Reader = (*dbEventQueueReader)(nil)
 
-func newDBEventQueue(db *sql.DB, taskID a2a.TaskID, pollFromID string) *dbEventQueue {
-	queue := &dbEventQueue{
+func newDBEventQueue(db *sql.DB, taskID a2a.TaskID, pollFromID string) *dbEventQueueReader {
+	queue := &dbEventQueueReader{
 		closeSignal: make(chan struct{}),
 		closed:      make(chan struct{}),
 		eventsCh:    make(chan *versionedEvent),
@@ -130,15 +131,15 @@ func newDBEventQueue(db *sql.DB, taskID a2a.TaskID, pollFromID string) *dbEventQ
 						closeSQLRows(ctx, rows)
 						continue
 					}
-					event, err := a2a.UnmarshalEventJSON([]byte(eventJSON))
-					if err != nil {
+					var sr a2a.StreamResponse
+					if err := json.Unmarshal([]byte(eventJSON), &sr); err != nil {
 						log.Error(ctx, "failed to unmarshal event", err)
 						continue
 					}
 					select {
 					case queue.eventsCh <- &versionedEvent{
-						event:   event,
-						version: a2a.TaskVersion(version),
+						event:   sr.Event,
+						version: taskstore.TaskVersion(version),
 					}:
 					case <-queue.closeSignal:
 						closeSQLRows(ctx, rows)
@@ -153,23 +154,23 @@ func newDBEventQueue(db *sql.DB, taskID a2a.TaskID, pollFromID string) *dbEventQ
 	return queue
 }
 
-func (q *dbEventQueue) Read(ctx context.Context) (a2a.Event, a2a.TaskVersion, error) {
+func (q *dbEventQueueReader) Read(ctx context.Context) (*eventqueue.Message, error) {
 	select {
 	case <-ctx.Done():
-		return nil, a2a.TaskVersionMissing, ctx.Err()
+		return nil, ctx.Err()
 
 	case res, ok := <-q.eventsCh:
 		if !ok {
-			return nil, a2a.TaskVersionMissing, eventqueue.ErrQueueClosed
+			return nil, eventqueue.ErrQueueClosed
 		}
-		return res.event, res.version, nil
+		return &eventqueue.Message{Event: res.event, TaskVersion: res.version}, nil
 
 	case <-q.closed:
-		return nil, a2a.TaskVersionMissing, eventqueue.ErrQueueClosed
+		return nil, eventqueue.ErrQueueClosed
 	}
 }
 
-func (q *dbEventQueue) Close() error {
+func (q *dbEventQueueReader) Close() error {
 	select {
 	case <-q.closed:
 		return nil
@@ -179,10 +180,14 @@ func (q *dbEventQueue) Close() error {
 	return nil
 }
 
-func (q *dbEventQueue) Write(ctx context.Context, event a2a.Event) error {
+type dbEventQueueWriter struct{}
+
+var _ eventqueue.Writer = (*dbEventQueueWriter)(nil)
+
+func (dbEventQueueWriter) Write(ctx context.Context, msg *eventqueue.Message) error {
 	return nil // events are written through TaskStore
 }
 
-func (q *dbEventQueue) WriteVersioned(ctx context.Context, event a2a.Event, version a2a.TaskVersion) error {
-	return nil // events are written through TaskStore
+func (dbEventQueueWriter) Close() error {
+	return nil
 }

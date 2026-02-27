@@ -18,8 +18,8 @@ import (
 	"context"
 	"errors"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2asrv/limiter"
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2asrv/limiter"
 )
 
 // ErrMalformedPayload is a non-retryable error which can be returned by [HandlerFn].
@@ -41,10 +41,10 @@ type Payload struct {
 	Type PayloadType
 	// TaskID is an ID of the task to execute or cancel.
 	TaskID a2a.TaskID
-	// CancelParams defines the cancelation parameters. It is only set for [PayloadTypeCancel].
-	CancelParams *a2a.TaskIDParams
-	// ExecuteParams defines the execution parameters. It is only set for [PayloadTypeExecute].
-	ExecuteParams *a2a.MessageSendParams
+	// CancelRequest defines the cancelation parameters. It is only set for [PayloadTypeCancel].
+	CancelRequest *a2a.CancelTaskRequest
+	// ExecuteRequest defines the execution parameters. It is only set for [PayloadTypeExecute].
+	ExecuteRequest *a2a.SendMessageRequest
 }
 
 // HandlerFn starts agent execution for the provided payload.
@@ -56,6 +56,11 @@ type Writer interface {
 	Write(context.Context, *Payload) (a2a.TaskID, error)
 }
 
+// HandlerConfig configures the work queue handler.
+type HandlerConfig struct {
+	Limiter limiter.ConcurrencyConfig
+}
+
 // Queue is an interface for the work distribution component.
 // Executor backend registers itself using RegisterHandler when RequestHandler is created.
 // HandlerFn can be used by work queue implementations to start execution when works is received.
@@ -63,5 +68,5 @@ type Queue interface {
 	Writer
 
 	// RegisterHandler registers an executor. This method is called by the SDK.
-	RegisterHandler(limiter.ConcurrencyConfig, HandlerFn)
+	RegisterHandler(HandlerConfig, HandlerFn)
 }

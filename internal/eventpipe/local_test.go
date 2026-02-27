@@ -19,8 +19,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
+	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2asrv/eventqueue"
 	"github.com/google/go-cmp/cmp"
 )
 
@@ -111,16 +111,4 @@ func TestLocalPipe_WriteBlocksWhenQueueFull(t *testing.T) {
 		_ = mustRead(t, pipe)
 	}
 	<-completed
-}
-
-func TestLocalPipeWriter_ReadAndCloseFail(t *testing.T) {
-	t.Parallel()
-	ctx := t.Context()
-	pipe := NewLocal()
-	if err := pipe.Writer.Close(); err == nil {
-		t.Fatal("pipe.Writer.Close() error = nil, want to fail")
-	}
-	if _, _, err := pipe.Writer.Read(ctx); err == nil {
-		t.Fatal("pipe.Writer.Read() error = nil, want to fail")
-	}
 }
