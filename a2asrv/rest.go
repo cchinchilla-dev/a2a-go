@@ -17,13 +17,16 @@ package a2asrv
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"iter"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v1/a2a"
+	"github.com/a2aproject/a2a-go/v1/internal/pathtemplate"
 	"github.com/a2aproject/a2a-go/v1/internal/rest"
 	"github.com/a2aproject/a2a-go/v1/internal/sse"
 	"github.com/a2aproject/a2a-go/v1/log"
@@ -48,6 +51,37 @@ func NewRESTHandler(handler RequestHandler) http.Handler {
 	return mux
 }
 
+// NewTenantRESTHandler creates an [http.Handler] which implements the HTTP+JSON A2A protocol binding.
+// It extracts tenant information from the URL path based on the provided template, strips the prefix,
+// and attaches the tenant ID (part inside {}) to the request context.
+// Examples of templates:
+// - "/{*}"
+// - "/locations/*/projects/{*}"
+// - "/{locations/*/projects/*}"
+func NewTenantRESTHandler(tenantTemplate string, handler RequestHandler) http.Handler {
+	compiledTemplate, err := pathtemplate.New(tenantTemplate)
+	if err != nil {
+		panic(fmt.Errorf("invalid template: %w", err))
+	}
+	restHandler := NewRESTHandler(handler)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		matchResult, ok := compiledTemplate.Match(r.URL.Path)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+
+		r2 := new(http.Request)
+		*r2 = *r
+		r2 = r2.WithContext(attachTenant(r.Context(), matchResult.Captured))
+		r2.URL = new(url.URL)
+		*r2.URL = *r.URL
+		r2.URL.Path = matchResult.Rest
+		r2.URL.RawPath = ""
+		restHandler.ServeHTTP(w, r2)
+	})
+}
+
 func handleSendMessage(handler RequestHandler) http.HandlerFunc {
 	return func(rw http.ResponseWriter, req *http.Request) {
 		ctx := req.Context()
@@ -56,6 +90,7 @@ func handleSendMessage(handler RequestHandler) http.HandlerFunc {
 			writeRESTError(ctx, rw, a2a.ErrParseError, a2a.TaskID(""))
 			return
 		}
+		fillTenant(ctx, &message.Tenant)
 
 		result, err := handler.SendMessage(ctx, &message)
 
@@ -78,6 +113,7 @@ func handleStreamMessage(handler RequestHandler) http.HandlerFunc {
 			writeRESTError(ctx, rw, a2a.ErrParseError, a2a.TaskID(""))
 			return
 		}
+		fillTenant(ctx, &message.Tenant)
 		handleStreamingRequest(handler.SendStreamingMessage(ctx, &message), rw, req)
 	}
 }
@@ -104,6 +140,7 @@ func handleGetTask(handler RequestHandler) http.HandlerFunc {
 			ID:            a2a.TaskID(taskID),
 			HistoryLength: historyLength,
 		}
+		fillTenant(ctx, &params.Tenant)
 
 		result, err := handler.GetTask(ctx, params)
 		if err != nil {
@@ -150,6 +187,7 @@ func handleListTasks(handler RequestHandler) http.HandlerFunc {
 		parse("historyLength", &request.HistoryLength)
 		parse("statusTimestampAfter", &request.StatusTimestampAfter)
 		parse("includeArtifacts", &request.IncludeArtifacts)
+		fillTenant(ctx, &request.Tenant)
 		if err != nil {
 			writeRESTError(ctx, rw, a2a.ErrInvalidRequest, a2a.TaskID(""))
 			return
@@ -179,7 +217,9 @@ func handlePOSTTasks(handler RequestHandler) http.HandlerFunc {
 			handleCancelTask(handler, taskID, rw, req)
 		} else if before, ok := strings.CutSuffix(idAndAction, ":subscribe"); ok {
 			taskID := before
-			handleStreamingRequest(handler.SubscribeToTask(ctx, &a2a.SubscribeToTaskRequest{ID: a2a.TaskID(taskID)}), rw, req)
+			req2 := &a2a.SubscribeToTaskRequest{ID: a2a.TaskID(taskID)}
+			fillTenant(ctx, &req2.Tenant)
+			handleStreamingRequest(handler.SubscribeToTask(ctx, req2), rw, req)
 		} else {
 			writeRESTError(ctx, rw, a2a.ErrInvalidRequest, a2a.TaskID(""))
 			return
@@ -193,6 +233,7 @@ func handleCancelTask(handler RequestHandler, taskID string, rw http.ResponseWri
 	id := &a2a.CancelTaskRequest{
 		ID: a2a.TaskID(taskID),
 	}
+	fillTenant(ctx, &id.Tenant)
 
 	result, err := handler.CancelTask(ctx, id)
 
@@ -290,6 +331,7 @@ func handleCreateTaskPushConfig(handler RequestHandler) http.HandlerFunc {
 			TaskID: a2a.TaskID(taskID),
 			Config: *config,
 		}
+		fillTenant(ctx, &params.Tenant)
 
 		result, err := handler.CreateTaskPushConfig(ctx, params)
 
@@ -319,6 +361,7 @@ func handleGetTaskPushConfig(handler RequestHandler) http.HandlerFunc {
 			TaskID: a2a.TaskID(taskID),
 			ID:     configID,
 		}
+		fillTenant(ctx, &params.Tenant)
 
 		result, err := handler.GetTaskPushConfig(ctx, params)
 
@@ -346,6 +389,7 @@ func handleListTaskPushConfigs(handler RequestHandler) http.HandlerFunc {
 		params := &a2a.ListTaskPushConfigRequest{
 			TaskID: a2a.TaskID(taskID),
 		}
+		fillTenant(ctx, &params.Tenant)
 
 		result, err := handler.ListTaskPushConfigs(ctx, params)
 
@@ -374,6 +418,7 @@ func handleDeleteTaskPushConfig(handler RequestHandler) http.HandlerFunc {
 			TaskID: a2a.TaskID(taskID),
 			ID:     configID,
 		}
+		fillTenant(ctx, &params.Tenant)
 
 		err := handler.DeleteTaskPushConfig(ctx, params)
 
@@ -388,7 +433,9 @@ func handleGetExtendedAgentCard(handler RequestHandler) http.HandlerFunc {
 	return func(rw http.ResponseWriter, req *http.Request) {
 		ctx := req.Context()
 		// TODO: extract tenant from path
-		result, err := handler.GetExtendedAgentCard(ctx, &a2a.GetExtendedAgentCardRequest{})
+		req2 := &a2a.GetExtendedAgentCardRequest{}
+		fillTenant(ctx, &req2.Tenant)
+		result, err := handler.GetExtendedAgentCard(ctx, req2)
 
 		if err != nil {
 			writeRESTError(ctx, rw, err, a2a.TaskID(""))
@@ -409,4 +456,23 @@ func writeRESTError(ctx context.Context, rw http.ResponseWriter, err error, task
 	if err := json.NewEncoder(rw).Encode(errResp); err != nil {
 		log.Error(ctx, "failed to write error response", err)
 	}
+}
+
+type tenantKeyType struct{}
+
+func fillTenant(ctx context.Context, tenant *string) {
+	if t := tenantFromContext(ctx); t != "" {
+		*tenant = t
+	}
+}
+
+func attachTenant(parent context.Context, tenant string) context.Context {
+	return context.WithValue(parent, tenantKeyType{}, tenant)
+}
+
+func tenantFromContext(ctx context.Context) string {
+	if tenant, ok := ctx.Value(tenantKeyType{}).(string); ok {
+		return tenant
+	}
+	return ""
 }
