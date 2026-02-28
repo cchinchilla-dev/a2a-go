@@ -19,11 +19,11 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/a2aproject/a2a-go/a2a"
+	"github.com/a2aproject/a2a-go/v1/a2a"
 )
 
 func ExampleNewMessage() {
-	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "Hello, agent!"})
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("Hello, agent!"))
 
 	fmt.Println("Role:", msg.Role)
 	fmt.Println("Parts count:", len(msg.Parts))
@@ -40,7 +40,7 @@ func ExampleNewMessageForTask() {
 		ContextID: "ctx-123",
 	}
 
-	msg := a2a.NewMessageForTask(a2a.MessageRoleAgent, taskInfo, a2a.TextPart{Text: "Working on it..."})
+	msg := a2a.NewMessageForTask(a2a.MessageRoleAgent, taskInfo, a2a.NewTextPart("Working on it..."))
 
 	fmt.Println("Role:", msg.Role)
 	fmt.Println("TaskID:", msg.TaskID)
@@ -52,7 +52,7 @@ func ExampleNewMessageForTask() {
 }
 
 func ExampleNewSubmittedTask() {
-	initialMsg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "Translate this document"})
+	initialMsg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("Translate this document"))
 
 	task := a2a.NewSubmittedTask(initialMsg, initialMsg)
 
@@ -61,7 +61,7 @@ func ExampleNewSubmittedTask() {
 	fmt.Println("Has ContextID:", task.ContextID != "")
 	fmt.Println("History length:", len(task.History))
 	// Output:
-	// State: submitted
+	// State: SUBMITTED
 	// Has TaskID: true
 	// Has ContextID: true
 	// History length: 1
@@ -82,53 +82,51 @@ func ExampleTaskState_Terminal() {
 		fmt.Printf("%-16s terminal=%v\n", s, s.Terminal())
 	}
 	// Output:
-	// submitted        terminal=false
-	// working          terminal=false
-	// completed        terminal=true
-	// canceled         terminal=true
-	// failed           terminal=true
-	// input-required   terminal=false
-	// rejected         terminal=true
+	// SUBMITTED        terminal=false
+	// WORKING          terminal=false
+	// COMPLETED        terminal=true
+	// CANCELED         terminal=true
+	// FAILED           terminal=true
+	// INPUT_REQUIRED   terminal=false
+	// REJECTED         terminal=true
 }
 
-func ExampleUnmarshalEventJSON() {
-	jsonData := []byte(`{"kind":"status-update","taskId":"task-1","contextId":"ctx-1","final":true,"status":{"state":"completed"}}`)
+func ExampleStreamResponse_UnmarshalJSON() {
+	jsonData := []byte(`{"statusUpdate":{"taskId":"task-1","contextId":"ctx-1","status":{"state":"WORKING"}}}`)
 
-	event, err := a2a.UnmarshalEventJSON(jsonData)
-	if err != nil {
+	var sr a2a.StreamResponse
+	if err := json.Unmarshal(jsonData, &sr); err != nil {
 		fmt.Println("Error:", err)
 		return
 	}
 
-	switch ev := event.(type) {
+	switch ev := sr.Event.(type) {
 	case *a2a.TaskStatusUpdateEvent:
 		fmt.Println("Event type: TaskStatusUpdateEvent")
 		fmt.Println("Task ID:", ev.TaskID)
 		fmt.Println("State:", ev.Status.State)
-		fmt.Println("Final:", ev.Final)
 	default:
 		fmt.Printf("Unexpected type: %T\n", ev)
 	}
 	// Output:
 	// Event type: TaskStatusUpdateEvent
 	// Task ID: task-1
-	// State: completed
-	// Final: true
+	// State: WORKING
 }
 
-func ExampleUnmarshalEventJSON_message() {
-	jsonData := []byte(`{"kind":"message","messageId":"msg-42","role":"user","parts":[{"kind":"text","text":"hello"}]}`)
+func ExampleStreamResponse_UnmarshalJSON_message() {
+	jsonData := []byte(`{"message":{"messageId":"msg-42","role":"user","parts":[{"kind":"text","text":"hello"}]}}`)
 
-	event, err := a2a.UnmarshalEventJSON(jsonData)
-	if err != nil {
+	var sr a2a.StreamResponse
+	if err := json.Unmarshal(jsonData, &sr); err != nil {
 		fmt.Println("Error:", err)
 		return
 	}
 
-	msg := event.(*a2a.Message)
+	msg := sr.Event.(*a2a.Message)
 	fmt.Println("ID:", msg.ID)
 	fmt.Println("Role:", msg.Role)
-	fmt.Println("Text:", msg.Parts[0].(a2a.TextPart).Text)
+	fmt.Println("Text:", msg.Parts[0].Text())
 	// Output:
 	// ID: msg-42
 	// Role: user
@@ -171,29 +169,29 @@ func ExampleNewStatusUpdateEvent() {
 	fmt.Println("Has timestamp:", event.Status.Timestamp != nil)
 	// Output:
 	// Task ID: task-1
-	// State: working
+	// State: WORKING
 	// Has timestamp: true
 }
 
 func ExampleNewArtifactEvent() {
 	taskInfo := a2a.TaskInfo{TaskID: "task-1", ContextID: "ctx-1"}
 
-	event := a2a.NewArtifactEvent(taskInfo, a2a.TextPart{Text: "Generated content"})
+	event := a2a.NewArtifactEvent(taskInfo, a2a.NewTextPart("Generated content"))
 
 	fmt.Println("Task ID:", event.TaskID)
 	fmt.Println("Has artifact ID:", event.Artifact.ID != "")
-	fmt.Println("Text:", event.Artifact.Parts[0].(a2a.TextPart).Text)
+	fmt.Println("Text:", event.Artifact.Parts[0].Text())
 	// Output:
 	// Task ID: task-1
 	// Has artifact ID: true
 	// Text: Generated content
 }
 
-func ExampleMessage_MarshalJSON() {
-	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "Hello"})
+func ExampleStreamResponse_MarshalJSON_message() {
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("Hello"))
 	msg.ID = "msg-1"
 
-	data, err := json.Marshal(msg)
+	data, err := json.Marshal(a2a.StreamResponse{Event: msg})
 	if err != nil {
 		fmt.Println("Error:", err)
 		return
@@ -201,24 +199,25 @@ func ExampleMessage_MarshalJSON() {
 
 	var raw map[string]any
 	if err = json.Unmarshal(data, &raw); err != nil {
-		fmt.Println("Error unmarshaling raw:", err)
+		fmt.Println("Error:", err)
 		return
 	}
-	fmt.Println("kind:", raw["kind"])
-	fmt.Println("role:", raw["role"])
+	fmt.Println("Has message key:", raw["message"] != nil)
+	inner := raw["message"].(map[string]any)
+	fmt.Println("role:", inner["role"])
 	// Output:
-	// kind: message
+	// Has message key: true
 	// role: user
 }
 
-func ExampleTask_MarshalJSON() {
+func ExampleStreamResponse_MarshalJSON_task() {
 	task := &a2a.Task{
 		ID:        "task-1",
 		ContextID: "ctx-1",
 		Status:    a2a.TaskStatus{State: a2a.TaskStateCompleted},
 	}
 
-	data, err := json.Marshal(task)
+	data, err := json.Marshal(a2a.StreamResponse{Event: task})
 	if err != nil {
 		fmt.Println("Error:", err)
 		return
@@ -226,12 +225,13 @@ func ExampleTask_MarshalJSON() {
 
 	var raw map[string]any
 	if err = json.Unmarshal(data, &raw); err != nil {
-		fmt.Println("Error unmarshaling raw:", err)
+		fmt.Println("Error:", err)
 		return
 	}
-	fmt.Println("kind:", raw["kind"])
-	fmt.Println("id:", raw["id"])
+	fmt.Println("Has task key:", raw["task"] != nil)
+	inner := raw["task"].(map[string]any)
+	fmt.Println("id:", inner["id"])
 	// Output:
-	// kind: task
+	// Has task key: true
 	// id: task-1
 }
